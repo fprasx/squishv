@@ -50,20 +50,12 @@ partition:
 
 
 
-# C declaration: int pinRead(int pin_num)
-# ARGUMENTS a0: pin_num
-# RETURNS bit read from GPIO pin 
 pinRead:
     li a2, 0x6000403C   # GPIO_IN_ADDR
     lw a1, 0(a2)        # a1: *GPIO_IN_ADDR
     srl a1, a1, a0      # shift down by pin_num
     andi a0, a1, 0x1
     ret
-
-
-# C declaration: void pinWrite(int pin_num, int value)
-# ARGUMENTS a0: pin_num, a1: value
-# RETURNS: Nothing
 pinWrite:
     li a2, 0x60004004   # GPIO_OUT_ADDR
     beqz a1, write_zero # check if value is 0

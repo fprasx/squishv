@@ -1,16 +1,17 @@
 <script lang="ts">
-    import { helloworld, parse_riscv } from "./pkg/riscv"
-    let input: string = "";
+	import CodeDisplay from './CodeDisplay.svelte';
+	import { parse_instruction, parse_riscv } from './pkg/riscv';
+	import { source } from './stores/source';
 </script>
 
 <main>
-    Hello from Svelte!
-    { helloworld() }
-    <textarea bind:value={input} name="riscv" cols="30" rows="10"></textarea>
-    {input}
-    {
-        JSON.stringify(parse_riscv(input))
-    }
+	<p>Enter your code here:</p>
+	<textarea bind:value={$source} name="riscv" cols="30" rows="10" />
+	{JSON.stringify(parse_riscv($source))}
+    {#each $source.split('\n') as line}
+        <div>{JSON.stringify(parse_instruction(line))}</div> 
+    {/each}
+	<CodeDisplay />
 </main>
 
 <style>

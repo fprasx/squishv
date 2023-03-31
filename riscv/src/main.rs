@@ -1,4 +1,7 @@
+use riscv::parse_v2::Lexer;
 fn main() {
-    println!("{:?}", "li a2, 0 # swapped = 0".parse::<riscv::parse::Riscv>());
-    println!("{}", 'b'.is_ascii_hexdigit());
+    let lexer = Lexer::new("addi x0, sp, 10 beqz");
+    for token in lexer {
+        println!("{token:?}")
+    }
 }

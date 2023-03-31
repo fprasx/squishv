@@ -13,13 +13,14 @@ pub enum Register {
 }
 
 macro_rules! register_parse_impl {
-    ($( $reg:ident )*) => {
+    ($( ($reg:ident = $xreg:ident) )*) => {
         impl FromStr for Register {
             type Err = &'static str;
             fn from_str(s: &str) -> Result<Register, &'static str> {
                 match s.trim() {
                     $(
-                        stringify!($reg) => Ok(Register::$reg),
+                        stringify!($reg) | stringify!($xreg)
+                            => Ok(Register::$reg),
                     )*
                     "zero" => Ok(Register::x0),
                     _ => Err("unrecognized register")
@@ -30,10 +31,41 @@ macro_rules! register_parse_impl {
 }
 
 register_parse_impl! {
-    x0 ra sp gp tp
-    t0 t1 t2 t3 t4 t5 t6
-    a0 a1 a2 a3 a4 a5 a6 a7
-    s0 s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11
+   (x0 = x0)
+   (ra = x1)
+   (sp = x2)
+   (gp = x3)
+   (tp = x4)
+
+   (t0 = x5)
+   (t1 = x6)
+   (t2 = x7)
+   (t3 = x28)
+   (t4 = x29)
+   (t5 = x30)
+   (t6 = x31)
+
+   (a0 = x10)
+   (a1 = x11)
+   (a2 = x12)
+   (a3 = x13)
+   (a4 = x14)
+   (a5 = x15)
+   (a6 = x16)
+   (a7 = x17)
+
+   (s0 = x8)
+   (s1 = x9)
+   (s2 = x18)
+   (s3 = x19)
+   (s4 = x20)
+   (s5 = x21)
+   (s6 = x22)
+   (s7 = x23)
+   (s8 = x24)
+   (s9 = x25)
+   (s10 = x26)
+   (s11 = x27)
 }
 
 /// Represents a register and offset like `0(x0)`.
@@ -193,8 +225,6 @@ macro_rules! instruction_parse_impl {
                 $(
                     if let Ok(instruction) = $instr(line) {
                         return Ok(instruction);
-                    } else {
-                        println!("{:?}", $instr(line))
                     }
                 )*
 
