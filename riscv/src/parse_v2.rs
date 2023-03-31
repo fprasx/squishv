@@ -31,41 +31,15 @@ macro_rules! register_parse_impl {
 }
 
 register_parse_impl! {
-   (x0 = x0)
-   (ra = x1)
-   (sp = x2)
-   (gp = x3)
-   (tp = x4)
+   (x0 = x0) (ra = x1) (sp = x2) (gp = x3) (tp = x4)
 
-   (t0 = x5)
-   (t1 = x6)
-   (t2 = x7)
-   (t3 = x28)
-   (t4 = x29)
-   (t5 = x30)
-   (t6 = x31)
+   (t0 = x5) (t1 = x6) (t2 = x7) (t3 = x28) (t4 = x29) (t5 = x30) (t6 = x31)
 
-   (a0 = x10)
-   (a1 = x11)
-   (a2 = x12)
-   (a3 = x13)
-   (a4 = x14)
-   (a5 = x15)
-   (a6 = x16)
-   (a7 = x17)
+   (a0 = x10) (a1 = x11) (a2 = x12) (a3 = x13)
+   (a4 = x14) (a5 = x15) (a6 = x16) (a7 = x17)
 
-   (s0 = x8)
-   (s1 = x9)
-   (s2 = x18)
-   (s3 = x19)
-   (s4 = x20)
-   (s5 = x21)
-   (s6 = x22)
-   (s7 = x23)
-   (s8 = x24)
-   (s9 = x25)
-   (s10 = x26)
-   (s11 = x27)
+   (s0 = x8) (s1 = x9) (s2 = x18) (s3 = x19) (s4 = x20) (s5 = x21) (s6 = x22)
+   (s7 = x23) (s8 = x24) (s9 = x25) (s10 = x26) (s11 = x27)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,28 +52,14 @@ pub enum Token<'a> {
     Ident(&'a str),
 }
 
-pub trait Parse<T>
-where
-    Self: Sized,
-{
-    type ParseError;
-    fn next(self) -> Result<(T, Self), Self::ParseError>;
-}
-
-enum LexerError {
-    OutOfInput,
-}
-
 pub struct Lexer<'a> {
     buf: &'a str,
-    tokens: Vec<Token<'a>>,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(buf: &'a str) -> Self {
         Lexer {
             buf,
-            tokens: vec![],
         }
     }
 }
@@ -125,59 +85,42 @@ impl<'a> Iterator for Lexer<'a> {
             self.buf = rest;
             return Some(Token::Colon);
         } else if let Some(rest) = self.buf.strip_prefix("0x") {
-            if let Some((index, _)) = rest
-                .char_indices()
-                .take_while(|(_, c)| c.is_ascii_hexdigit())
-                .last()
-            {
-                return match parse_int::parse::<i32>(&format!("0x{}", &rest[..index + 1])) {
+            if let Some((digits, rem)) = rest.consume(|c| c.is_ascii_hexdigit()) {
+                return match parse_int::parse::<i32>(&format!("0x{}", digits)) {
                     Ok(number) => {
-                        self.buf = &rest[index + 1..];
+                        self.buf = rem;
                         return Some(Token::Constant(number));
                     }
                     Err(_) => None,
                 };
             }
         }
-        if let Some((index, _)) = self
-            .buf
-            .char_indices()
-            .take_while(|(_, c)| c.is_ascii_digit())
-            .last()
-        {
-            match parse_int::parse::<i32>(&self.buf[..index + 1]) {
+        if let Some((digits, rest)) = self.buf.consume(|c| c.is_ascii_digit()) {
+            match parse_int::parse::<i32>(digits) {
                 Ok(number) => {
-                    self.buf = &self.buf[index + 1..];
+                    self.buf = rest;
                     Some(Token::Constant(number))
                 }
-
-                Err(e) => None,
+                Err(_) => None,
             }
-        } else if let Some((index, _)) = self
-            .buf
-            .char_indices()
-            .take_while(|(_, c)| c.is_alphanumeric())
-            .last()
-        {
-            // Don't move this line before the next because it will then refer
-            // to the next self.buf
-            let ret = &self.buf[..index + 1];
-            self.buf = &self.buf[index + 1..];
-            Some(Token::Ident(ret))
+        } else if let Some((label, rest)) = self.buf.consume(char::is_alphanumeric) {
+            self.buf = rest;
+            Some(Token::Ident(label))
         } else {
             None
         }
     }
 }
 
-trait Consume {
-    fn consume<F>(&self, predicate: F) -> Option<(&str, &str)>
+/// Try to consume characters from a string that follow a certain predicate.
+trait Consume<'a> {
+    fn consume<F>(self, predicate: F) -> Option<(&'a str, &'a str)>
     where
         F: Fn(char) -> bool;
 }
 
-impl Consume for &str {
-    fn consume<F>(&self, predicate: F) -> Option<(&str, &str)>
+impl<'a> Consume<'a> for &'a str {
+    fn consume<F>(self, predicate: F) -> Option<(&'a str, &'a str)>
     where
         F: Fn(char) -> bool,
     {
