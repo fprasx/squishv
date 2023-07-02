@@ -6,6 +6,15 @@ const REG_IMM: [&str; 9] = [
     "addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai",
 ];
 
+const REG_REG: [&str; 10] = [
+    "add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and",
+];
+
+const BRANCH: [&str; 10] = [
+    "beq", "bne", "blt", "bge", "bltu", "bgeu", "bgt", "ble", "bgtu", "bleu",
+];
+const BRANCH_ZERO: [&str; 6] = ["beqz", "bnez", "bltz", "bgez", "bgtz", "blez"];
+
 #[allow(non_camel_case_types)]
 #[rustfmt::skip]
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
@@ -105,6 +114,31 @@ impl<'a> Token<'a> {
         match self {
             Token::Constant(inner) => inner,
             other => panic!("called unwrap ident on a {other}"),
+        }
+    }
+}
+
+impl Display for Token<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Token::RightParen() => write!(f, "("),
+            Token::LeftParen() => write!(f, ")"),
+            Token::Comma() => write!(f, ","),
+            Token::Colon() => write!(f, ":"),
+            Token::Minus() => write!(f, "-"),
+            Token::Constant(num) => write!(f, "{}", num),
+            Token::Ident(ident) => write!(f, "{}", ident),
+        }
+    }
+}
+
+impl TryFrom<Token<'_>> for Register {
+    type Error = String;
+
+    fn try_from(value: Token) -> Result<Self, Self::Error> {
+        match value {
+            Token::Ident(ident) => ident.parse(),
+            other => Err(format!("Expected register, found {other}")),
         }
     }
 }
@@ -287,54 +321,102 @@ pub enum Item<'a> {
     Label(&'a str),
 }
 
-pub fn assembly(source: &str) -> Result<Item, String> {
+pub fn decomment(source: &str) -> String {
+    source
+        .split('\n')
+        .map(|s| {
+            if let Some(index) = s.find('#') {
+                &s[..index]
+            } else {
+                s
+            }
+        })
+        .collect::<String>()
+}
+
+pub fn parse_item(source: &str) -> Result<Item, String> {
     let mut tokens = Lexer::new(source);
     let ident = tokens.ident()?.unwrap_ident();
     if let Ok(Token::Colon()) = tokens.colon() {
         return Ok(Item::Label(ident));
     }
-    if REG_IMM.contains(&ident) {
-        reg_imm_args(&mut tokens).map(Item::Instruction)
+    Ok(Item::Instruction(if REG_IMM.contains(&ident) {
+        let rd = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let r1 = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let negative = tokens.minus().is_ok();
+        let mut imm: i32 = tokens.constant()?.unwrap_constant();
+        if negative {
+            imm = -imm
+        }
+        match ident {
+            "slti" => Instruction::slti { rd, r1, imm },
+            "addi" => Instruction::addi { rd, r1, imm },
+            "sltiu" => Instruction::sltiu { rd, r1, imm },
+            "xori" => Instruction::xori { rd, r1, imm },
+            "ori" => Instruction::ori { rd, r1, imm },
+            "andi" => Instruction::andi { rd, r1, imm },
+            "slli" => Instruction::slli { rd, r1, imm },
+            "srli" => Instruction::srli { rd, r1, imm },
+            "srai" => Instruction::srai { rd, r1, imm },
+            _ => unreachable!("list of REG_IMM opcodes does not match with match statement: you may have forgotten to keep them in sync")
+        }
+    } else if REG_REG.contains(&ident) {
+        let rd = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let r1 = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let r2 = tokens.ident()?.try_into()?;
+        match ident {
+            "add" => Instruction::and { rd, r1, r2 },
+            "sub" => Instruction::sub { rd, r1, r2 },
+            "sll" => Instruction::sll { rd, r1, r2 },
+            "slt" => Instruction::slt { rd, r1, r2 },
+            "sltu" => Instruction::sltu { rd, r1, r2 },
+            "xor" => Instruction::xor { rd, r1, r2 },
+            "srl" => Instruction::srl { rd, r1, r2 },
+            "sra" => Instruction::sra { rd, r1, r2 },
+            "or" => Instruction::or { rd, r1, r2 },
+            "and" => Instruction::and { rd, r1, r2 },
+            _ => unreachable!("list of REG_REG opcodes does not match with match statement: you may have forgotten to keep them in sync")
+        }
     } else {
         todo!()
-    }
+    }))
 }
 
-fn reg_imm_args<'a>(tokens: &mut Lexer<'a>) -> Result<Instruction<'a>, String> {
-    let rd: Register = tokens.ident()?.try_into()?;
+fn reg_imm_args(tokens: &mut Lexer) -> Result<(Register, Register, i32), String> {
+    let rd = tokens.ident()?.try_into()?;
     let _ = tokens.comma()?;
-    let r1: Register = tokens.ident()?.try_into()?;
+    let r1 = tokens.ident()?.try_into()?;
     let _ = tokens.comma()?;
     let negative = tokens.minus().is_ok();
     let imm: i32 = tokens.constant()?.unwrap_constant();
-    Ok(Instruction::addi {
-        rd,
-        r1,
-        imm: if negative { -imm } else { imm },
-    })
+    Ok((rd, r1, if negative { -imm } else { imm }))
 }
 
-impl Display for Token<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Token::RightParen() => write!(f, "("),
-            Token::LeftParen() => write!(f, ")"),
-            Token::Comma() => write!(f, ","),
-            Token::Colon() => write!(f, ":"),
-            Token::Minus() => write!(f, "-"),
-            Token::Constant(num) => write!(f, "{}", num),
-            Token::Ident(ident) => write!(f, "{}", ident),
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decomment_empty() {
+        assert_eq!(decomment(""), "")
     }
-}
 
-impl TryFrom<Token<'_>> for Register {
-    type Error = String;
+    #[test]
+    fn decomment_hashtag() {
+        assert_eq!(decomment("#"), "")
+    }
 
-    fn try_from(value: Token) -> Result<Self, Self::Error> {
-        match value {
-            Token::Ident(ident) => ident.parse(),
-            other => Err(format!("Expected register, found {other}")),
-        }
+    #[test]
+    fn decomment_single_line_comment() {
+        assert_eq!(decomment("# blah blah"), "")
+    }
+
+    #[test]
+    fn decomment_end_of_line_comment() {
+        assert_eq!(decomment("add x0, x0, x0 # blah blah"), "add x0, x0, x0 ")
     }
 }
