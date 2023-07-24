@@ -273,6 +273,11 @@ impl<'a> LexerIter<'a> {
     pub fn peek(&mut self) -> Option<&LexResult<'a>> {
         self.peek.as_ref()
     }
+
+    pub fn new(mut lexer: Lexer<'a>) -> Self {
+        let next = lexer.next_from_buf();
+        LexerIter { inner: lexer, errored: false, peek: next }
+    }
 }
 
 impl<'a> Iterator for LexerIter<'a> {

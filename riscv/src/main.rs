@@ -1,10 +1,12 @@
-use riscv::parse_v2::{parse_item, Lexer};
+use indoc::indoc;
+use riscv::{lex::{LexerIter, Lexer}, parse::parse_item};
 
 fn main() {
-    let lexer = Lexer::new("addi x0, sp, 10 beqz");
-    for token in lexer {
+    let source = indoc! {"
+        addi x0, x0, 1 
+    "};
+    let mut source = LexerIter::new(Lexer::new(include_str!("test.s")));
+    while let Ok(token) = parse_item(&mut source) {
         println!("{token:?}")
     }
-    let addi = parse_item("addi s0, t1, -0x123");
-    println!("{addi:?}")
 }

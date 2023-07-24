@@ -50,8 +50,6 @@ neg
 jal
 jalr
 call
-pseudo_jal
 j
 jr
-pseudo_jalr
 ret

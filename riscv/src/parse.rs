@@ -1,6 +1,49 @@
+use anyhow::bail;
 use std::str::FromStr;
+use thiserror::Error;
+
+use crate::lex::{Lexer, TokenInner, LexerIter};
 
 use serde::{Deserialize, Serialize};
+
+use crate::lex::Token;
+
+fn is_reg_imm(instr: &str) -> bool {
+    [
+        "addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai",
+    ]
+    .contains(&instr)
+}
+
+fn is_reg_reg(instr: &str) -> bool {
+    [
+        "add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and",
+    ]
+    .contains(&instr)
+}
+
+fn is_branch(instr: &str) -> bool {
+    [
+        "beq", "bne", "blt", "bge", "bltu", "bgeu", "bgt", "ble", "bgtu", "bleu",
+    ]
+    .contains(&instr)
+}
+
+fn is_branch_zero(instr: &str) -> bool {
+    ["beqz", "bnez", "bltz", "bgez", "bgtz", "blez"].contains(&instr)
+}
+
+fn is_unary(instr: &str) -> bool {
+    ["mv", "neg", "not"].contains(&instr)
+}
+
+fn is_mem_op(instr: &str) -> bool {
+    ["lw", "lh", "lb", "sw", "sh", "sb"].contains(&instr)
+}
+
+fn is_load(instr: &str) -> bool {
+    ["lui", "li"].contains(&instr)
+}
 
 #[allow(non_camel_case_types)]
 #[rustfmt::skip]
@@ -12,18 +55,40 @@ pub enum Register {
     s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11,
 }
 
+#[derive(Error, Debug)]
+pub enum RegisterParseError {
+    // Note: we can't include the actual offending token here because anyhow
+    // requires it's error's be 'static but the token would only live for 'a
+    #[error("can only parse register out of ident, but got '{0}'")]
+    InvalidToken(String),
+    #[error("'{0}' is not a valid register")]
+    ParseError(String),
+}
+
+impl TryFrom<Token<'_>> for Register {
+    type Error = RegisterParseError;
+
+    fn try_from(token: Token) -> Result<Self, Self::Error> {
+        match token.inner() {
+            TokenInner::Ident(ident) => ident.parse().map_err(RegisterParseError::ParseError),
+            other => Err(RegisterParseError::InvalidToken(other.to_string())),
+        }
+    }
+}
+
+/// Parse a register from a string
 macro_rules! register_parse_impl {
     ($( ($reg:ident = $xreg:ident) )*) => {
         impl FromStr for Register {
-            type Err = &'static str;
-            fn from_str(s: &str) -> Result<Register, &'static str> {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Register, Self::Err> {
                 match s.trim() {
                     $(
                         stringify!($reg) | stringify!($xreg)
                             => Ok(Register::$reg),
                     )*
                     "zero" => Ok(Register::x0),
-                    _ => Err("unrecognized register")
+                    unknown => Err(format!("unrecognized register {unknown}"))
                 }
             }
         }
@@ -31,69 +96,21 @@ macro_rules! register_parse_impl {
 }
 
 register_parse_impl! {
-   (x0 = x0)
-   (ra = x1)
-   (sp = x2)
-   (gp = x3)
-   (tp = x4)
+   (x0 = x0) (ra = x1) (sp = x2) (gp = x3) (tp = x4)
 
-   (t0 = x5)
-   (t1 = x6)
-   (t2 = x7)
-   (t3 = x28)
-   (t4 = x29)
-   (t5 = x30)
-   (t6 = x31)
+   (t0 = x5) (t1 = x6) (t2 = x7) (t3 = x28) (t4 = x29) (t5 = x30) (t6 = x31)
 
-   (a0 = x10)
-   (a1 = x11)
-   (a2 = x12)
-   (a3 = x13)
-   (a4 = x14)
-   (a5 = x15)
-   (a6 = x16)
-   (a7 = x17)
+   (a0 = x10) (a1 = x11) (a2 = x12) (a3 = x13)
+   (a4 = x14) (a5 = x15) (a6 = x16) (a7 = x17)
 
-   (s0 = x8)
-   (s1 = x9)
-   (s2 = x18)
-   (s3 = x19)
-   (s4 = x20)
-   (s5 = x21)
-   (s6 = x22)
-   (s7 = x23)
-   (s8 = x24)
-   (s9 = x25)
-   (s10 = x26)
-   (s11 = x27)
-}
-
-/// Represents a register and offset like `0(x0)`.
-/// This is mainly implemented so it's easy to parse with the macro
-#[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone, Copy)]
-pub struct RegOffset {
-    reg: Register,
-    offset: i32,
-}
-
-impl FromStr for RegOffset {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (num, mut reg) = s.split_once('(').ok_or("no parentheses in token")?;
-        // Trim the close parenthesis
-        reg = &reg[..reg.find(')').ok_or("expected a closing parenthesis")?];
-        Ok(RegOffset {
-            reg: reg.parse()?,
-            offset: parse_int::parse::<i32>(num.trim()).map_err(|e| e.to_string())?,
-        })
-    }
+   (s0 = x8) (s1 = x9) (s2 = x18) (s3 = x19) (s4 = x20) (s5 = x21) (s6 = x22)
+   (s7 = x23) (s8 = x24) (s9 = x25) (s10 = x26) (s11 = x27)
 }
 
 #[rustfmt::skip]
 #[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
-pub enum Instruction {
+pub enum Instruction<'a> {
     // Register immediate
     addi  { rd: Register, r1: Register, imm: i32, },
     slti  { rd: Register, r1: Register, imm: i32, },
@@ -104,10 +121,6 @@ pub enum Instruction {
     slli  { rd: Register, r1: Register, imm: i32, },
     srli  { rd: Register, r1: Register, imm: i32, },
     srai  { rd: Register, r1: Register, imm: i32, },
-
-    // Loady bois
-    lui { rd: Register, imm: i32, },
-    li  { rd: Register, imm: i32, },
 
     // Register register
     add  { rd: Register, r1: Register, r2: Register, },
@@ -122,28 +135,36 @@ pub enum Instruction {
     and  { rd: Register, r1: Register, r2: Register, },
 
     // Memory
-    lw { rd: Register, mem: RegOffset },
-    sw { r1: Register, mem: RegOffset },
+    lw { rd: Register, offset: i32, r1: Register  },
+    lh { rd: Register, offset: i32, r1: Register  },
+    lb { rd: Register, offset: i32, r1: Register  },
+    sw { r2: Register, offset: i32, r1: Register },
+    sh { r2: Register, offset: i32, r1: Register },
+    sb { r2: Register, offset: i32, r1: Register },
 
     // Branches + some fake branches
-    beq  { r1: Register, r2: Register, label: String },
-    bne  { r1: Register, r2: Register, label: String },
-    blt  { r1: Register, r2: Register, label: String },
-    bge  { r1: Register, r2: Register, label: String },
-    bltu { r1: Register, r2: Register, label: String },
-    bgeu { r1: Register, r2: Register, label: String },
-    bgt  { r1: Register, r2: Register, label: String },
-    ble  { r1: Register, r2: Register, label: String },
-    bgtu { r1: Register, r2: Register, label: String },
-    bleu { r1: Register, r2: Register, label: String },
+    beq  { r1: Register, r2: Register, label: &'a str },
+    bne  { r1: Register, r2: Register, label: &'a str },
+    blt  { r1: Register, r2: Register, label: &'a str },
+    bge  { r1: Register, r2: Register, label: &'a str },
+    bltu { r1: Register, r2: Register, label: &'a str },
+    bgeu { r1: Register, r2: Register, label: &'a str },
+    bgt  { r1: Register, r2: Register, label: &'a str },
+    ble  { r1: Register, r2: Register, label: &'a str },
+    bgtu { r1: Register, r2: Register, label: &'a str },
+    bleu { r1: Register, r2: Register, label: &'a str },
+
+    // Loady bois
+    lui { rd: Register, imm: i32, },
+    li  { rd: Register, imm: i32, },
 
     // 0-branches
-    beqz { r1: Register, label: String },
-    bnez { r1: Register, label: String },
-    bltz { r1: Register, label: String },
-    bgez { r1: Register, label: String },
-    bgtz { r1: Register, label: String },
-    blez { r1: Register, label: String },
+    beqz { r1: Register, label: &'a str },
+    bnez { r1: Register, label: &'a str },
+    bltz { r1: Register, label: &'a str },
+    bgez { r1: Register, label: &'a str },
+    bgtz { r1: Register, label: &'a str },
+    blez { r1: Register, label: &'a str },
 
     // Unaries
     mv  { rd: Register, r1: Register },
@@ -151,364 +172,235 @@ pub enum Instruction {
     neg { rd: Register, r1: Register },
 
     // Calling and jumping
-    jal         { rd: Register, label: String },
-    jalr        { rd: Register, addr: RegOffset },
-    call        { label: String },
-    pseudo_jal  { label: String },
-    j           { label: String },
+    call        { label: &'a str },
+    // Note: if a register is not provided, assume rd
+    jal         { rd: Register, label: &'a str },
+    // Note: if a register is not provided, assume 0(rd)
+    jalr        { rd: Register, offset: i32, r1: Register },
+    j           { label: &'a str },
     jr          { rs: Register },
-    pseudo_jalr { rs: Register },
     ret         {},
 }
 
-macro_rules! instruction_parse_impl {
-    // This has to go above the next rule so it matches first
-    // Otherwise the next rule will fail to parse ret
-    (ret {}) => {
-        fn ret(line: &str) -> Result<Instruction, String> {
-            if line.trim() == "ret" {
-                Ok(Instruction::ret {})
-            } else {
-                Err("line was not just `ret`".into())
-            }
-        }
-    };
-
-    ( $instr:ident { $( $field:ident: $type:ty ),* $(,)? } ) => {
-        fn $instr(line: &str) -> Result<Instruction, String> {
-            // We know the ret case is covered so we can call unwrap
-            let (op, args) = line.split_once(' ').ok_or("did not find op and args")?;
-
-            // Check opcode
-            if op != stringify!($instr) {
-                return Err("opcode was wrong".into());
-            }
-
-            // We have to take care to parse spaced out instructions
-            let mut tokens = args
-                .trim()
-                // First separate the arguments
-                .split(',')
-                // Then get rid of spaces
-                .map(|tok| tok.replace(" ", ""))
-                // Replace *hex integer literals* with decimal integers.
-                // Hex integers can occur in register offsets (ex. lw a0, 0x(a0)),
-                // but regoffset deals with this in its own parse impl
-                .map(
-                    |token| parse_int::parse::<i32>(&token).map_or(token, |num| num.to_string())
-                );
-
-            Ok(Instruction::$instr {
-                $(
-                    $field: tokens
-                        .next()
-                        .ok_or::<String>(concat!("expected ", stringify!($type), ", found empty stream").into())?
-                        .parse::<$type>()
-                        .map_err(|e| format!("error parsing {}: {}", stringify!($type), e))?
-                ),*
-            })
-        }
-    };
-
-    ($( $instr:ident { $( $field:ident: $type:ty ),* $(,)? } ),*) => {
-        // Create a parse method for each instruction
-        $( instruction_parse_impl!($instr { $( $field: $type ),*  }); )*
-
-        impl FromStr for Instruction {
-            type Err = String;
-
-            fn from_str(mut line: &str) -> Result<Instruction, Self::Err> {
-                line = line.trim();
-                if let Some(index) = line.find('#') {
-                    line = &line[..index];
-                }
-                $(
-                    if let Ok(instruction) = $instr(line) {
-                        return Ok(instruction);
-                    }
-                )*
-
-                // Deal with instructions that can be parsed in multiple ways
-                if line.starts_with("jal") {
-                    if let Ok(instruction) = pseudo_jal(&format!("pseudo_{line}")) {
-                        return Ok(instruction);
-                    }
-                }
-
-                if line.starts_with("jalr") {
-                    if let Ok(instruction) = pseudo_jalr(&format!("pseudo_{line}")) {
-                        return Ok(instruction);
-                    }
-                }
-
-                Err(format!("No instructions matched"))
-            }
-        }
-    };
-}
-
-instruction_parse_impl! {
-    // Register immediate
-    addi  { rd: Register, r1: Register, imm: i32, },
-    slti  { rd: Register, r1: Register, imm: i32, },
-    sltiu { rd: Register, r1: Register, imm: i32, },
-    xori  { rd: Register, r1: Register, imm: i32, },
-    ori   { rd: Register, r1: Register, imm: i32, },
-    andi  { rd: Register, r1: Register, imm: i32, },
-    slli  { rd: Register, r1: Register, imm: i32, },
-    srli  { rd: Register, r1: Register, imm: i32, },
-    srai  { rd: Register, r1: Register, imm: i32, },
-
-    // Loady bois
-    lui { rd: Register, imm: i32, },
-    li  { rd: Register, imm: i32, },
-
-    // Register register
-    add  { rd: Register, r1: Register, r2: Register, },
-    sub  { rd: Register, r1: Register, r2: Register, },
-    sll  { rd: Register, r1: Register, r2: Register, },
-    slt  { rd: Register, r1: Register, r2: Register, },
-    sltu { rd: Register, r1: Register, r2: Register, },
-    xor  { rd: Register, r1: Register, r2: Register, },
-    srl  { rd: Register, r1: Register, r2: Register, },
-    sra  { rd: Register, r1: Register, r2: Register, },
-    or   { rd: Register, r1: Register, r2: Register, },
-    and  { rd: Register, r1: Register, r2: Register, },
-
-    // Memory
-    lw { rd: Register, mem: RegOffset },
-    sw { r1: Register, mem: RegOffset },
-
-    // Branches + some fake branches
-    beq  { r1: Register, r2: Register, label: String },
-    bne  { r1: Register, r2: Register, label: String },
-    blt  { r1: Register, r2: Register, label: String },
-    bge  { r1: Register, r2: Register, label: String },
-    bltu { r1: Register, r2: Register, label: String },
-    bgeu { r1: Register, r2: Register, label: String },
-    bgt  { r1: Register, r2: Register, label: String },
-    ble  { r1: Register, r2: Register, label: String },
-    bgtu { r1: Register, r2: Register, label: String },
-    bleu { r1: Register, r2: Register, label: String },
-
-    // 0-branches
-    beqz { r1: Register, label: String },
-    bnez { r1: Register, label: String },
-    bltz { r1: Register, label: String },
-    bgez { r1: Register, label: String },
-    bgtz { r1: Register, label: String },
-    blez { r1: Register, label: String },
-
-    // Unaries
-    mv  { rd: Register, r1: Register },
-    not { rd: Register, r1: Register },
-    neg { rd: Register, r1: Register },
-
-    // Calling and jumping
-    jal         { rd: Register, label: String },
-    jalr        { rd: Register, addr: RegOffset },
-    call        { label: String },
-    pseudo_jal  { label: String },
-    j           { label: String },
-    jr          { rs: Register },
-    pseudo_jalr { rs: Register },
-    ret         {}
-}
-
+/// An item of RISC-V assembly, either an instruction or label (for now)
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
-pub enum Riscv {
-    Instruction(Instruction),
-    Label(String),
-    Word { value: i32, location: i32 },
-    Comment(String),
+pub enum Item<'a> {
+    #[serde(borrow)]
+    Instruction(Instruction<'a>),
+    Label(&'a str),
 }
 
-impl FromStr for Riscv {
-    type Err = String;
-
-    fn from_str(mut s: &str) -> Result<Self, Self::Err> {
-        s = s.trim();
-        if let Some(comment) = s.strip_prefix('#') {
-            Ok(Riscv::Comment(comment.into()))
-        } else if let Some(label) = s.strip_suffix(':') {
-            if label.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                Ok(Riscv::Label(label.into()))
-            } else {
-                Err("non alphanumeric character detected in label".into())
-            }
-        } else if let Some(_directive) = s.strip_prefix('.') {
-            todo!()
-        } else {
-            s.parse::<Instruction>().map(Riscv::Instruction)
-        }
+pub fn parse_item<'a>(tokens: &mut LexerIter<'a>) -> anyhow::Result<Item<'a>> {
+    //let mut tokens = Lexer::new(source).into_iter();
+    while matches!(
+        tokens.peek(),
+        Some(Ok(Token {
+            inner: TokenInner::Comment(_),
+            ..
+        }))
+    ) {
+        tokens.next().unwrap()?;
     }
-}
-
-pub fn parse_program(program: String) -> Vec<Result<Riscv, String>> {
-    program
-        .split('\n')
-        // Strop comments
-        .map(|s| {
-            if let Some(index) = s.find('#') {
-                &s[..index]
-            } else {
-                s
+    let ident = tokens.ident()?.unwrap_ident();
+    if let Ok(TokenInner::Colon) = tokens.colon().map(|token| token.inner()) {
+        return Ok(Item::Label(ident));
+    }
+    Ok(Item::Instruction(if is_reg_imm(ident) {
+        let rd = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let r1 = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let negative = tokens.minus().is_ok();
+        let mut imm: i32 = tokens.constant()?.unwrap_constant();
+        if negative {
+            imm = -imm
+        }
+        match ident {
+            "slti" => Instruction::slti { rd, r1, imm },
+            "addi" => Instruction::addi { rd, r1, imm },
+            "sltiu" => Instruction::sltiu { rd, r1, imm },
+            "xori" => Instruction::xori { rd, r1, imm },
+            "ori" => Instruction::ori { rd, r1, imm },
+            "andi" => Instruction::andi { rd, r1, imm },
+            "slli" => Instruction::slli { rd, r1, imm },
+            "srli" => Instruction::srli { rd, r1, imm },
+            "srai" => Instruction::srai { rd, r1, imm },
+            other => panic!("unkown register-immediate instruction: {other}"),
+        }
+    } else if is_reg_reg(ident) {
+        let rd = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let r1 = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let r2 = tokens.ident()?.try_into()?;
+        match ident {
+            "add" => Instruction::and { rd, r1, r2 },
+            "sub" => Instruction::sub { rd, r1, r2 },
+            "sll" => Instruction::sll { rd, r1, r2 },
+            "slt" => Instruction::slt { rd, r1, r2 },
+            "sltu" => Instruction::sltu { rd, r1, r2 },
+            "xor" => Instruction::xor { rd, r1, r2 },
+            "srl" => Instruction::srl { rd, r1, r2 },
+            "sra" => Instruction::sra { rd, r1, r2 },
+            "or" => Instruction::or { rd, r1, r2 },
+            "and" => Instruction::and { rd, r1, r2 },
+            other => panic!("unknown register-register instruction: {other}"),
+        }
+    } else if is_branch(ident) {
+        let r1 = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let r2 = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let label = tokens.ident()?.unwrap_ident();
+        match ident {
+            "beq" => Instruction::beq { r1, r2, label },
+            "bne" => Instruction::beq { r1, r2, label },
+            "blt" => Instruction::beq { r1, r2, label },
+            "bge" => Instruction::beq { r1, r2, label },
+            "bltu" => Instruction::beq { r1, r2, label },
+            "bgeu" => Instruction::beq { r1, r2, label },
+            "bgt" => Instruction::beq { r1, r2, label },
+            "ble" => Instruction::beq { r1, r2, label },
+            "bgtu" => Instruction::beq { r1, r2, label },
+            "bleu" => Instruction::beq { r1, r2, label },
+            other => panic!("unknown branch instruction: {other}"),
+        }
+    } else if is_branch_zero(ident) {
+        let r1 = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let label = tokens.ident()?.unwrap_ident();
+        match ident {
+            "beqz" => Instruction::beqz { r1, label },
+            "bnez" => Instruction::beqz { r1, label },
+            "bltz" => Instruction::beqz { r1, label },
+            "bgez" => Instruction::beqz { r1, label },
+            "bgtz" => Instruction::beqz { r1, label },
+            "blez" => Instruction::beqz { r1, label },
+            other => panic!("unkown branch-zero instruction: {other}"),
+        }
+    } else if is_unary(ident) {
+        let rd = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let r1 = tokens.ident()?.try_into()?;
+        match ident {
+            "mv" => Instruction::mv { rd, r1 },
+            "not" => Instruction::mv { rd, r1 },
+            "neg" => Instruction::mv { rd, r1 },
+            other => panic!("unkown unary instruction: {other}"),
+        }
+    } else if is_mem_op(ident) {
+        let reg = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let offset = tokens.constant()?.unwrap_constant();
+        let _ = tokens.left_paren()?;
+        let r1 = tokens.ident()?.try_into()?;
+        let _ = tokens.right_paren()?;
+        match ident {
+            "sw" => Instruction::sw {
+                r2: reg,
+                offset,
+                r1,
+            },
+            "sh" => Instruction::sh {
+                r2: reg,
+                offset,
+                r1,
+            },
+            "sb" => Instruction::sb {
+                r2: reg,
+                offset,
+                r1,
+            },
+            "lw" => Instruction::lw {
+                rd: reg,
+                offset,
+                r1,
+            },
+            "lh" => Instruction::lh {
+                rd: reg,
+                offset,
+                r1,
+            },
+            "lb" => Instruction::lb {
+                rd: reg,
+                offset,
+                r1,
+            },
+            other => panic!("unknown memory instruction {other}"),
+        }
+    } else if is_load(ident) {
+        let rd = tokens.ident()?.try_into()?;
+        let _ = tokens.comma()?;
+        let imm = tokens.constant()?.unwrap_constant();
+        match ident {
+            "lui" => Instruction::lui { rd, imm },
+            "li" => Instruction::li { rd, imm },
+            other => panic!("unknown memory instruction {other}"),
+        }
+    } else {
+        // call        { label: &'a str },
+        // jal         { rd: Register, label: &'a str },
+        // jalr        { rd: Register, offset: i32, r1: Register },
+        // j           { label: &'a str },
+        // jr          { rs: Register },
+        // ret         {},
+        match ident {
+            "call" => {
+                let label = tokens.ident()?.unwrap_ident();
+                Instruction::call { label }
             }
-        })
-        .map(|s| {
-            if let Some(index) = s.find("//") {
-                &s[..index]
-            } else {
-                s
+            // Note: if a register is not provided, assume rd
+            "jal" => {
+                let ident = tokens.ident()?;
+                if let Ok(rd) = ident.clone().try_into() {
+                    // Register was provided, continue
+                    let _ = tokens.comma()?;
+                    let label = tokens.ident()?.unwrap_ident();
+                    Instruction::jal { rd, label }
+                } else {
+                    // Assume register is rd
+                    Instruction::jal {
+                        rd: "ra".parse().expect(""),
+                        label: ident.unwrap_ident(),
+                    }
+                }
             }
-        })
-        .filter(|s| !s.trim().is_empty())
-        .map(|line| {
-            println!("{line}");
-            line.trim()
-                .parse()
-                .map_err(|err| format!("error parsing {line}: {err}"))
-        })
-        .collect()
+            // Note: if a register is not provided, assume 0(rd)
+            "jalr" => {
+                let reg = tokens.ident()?.try_into()?;
+                if let Ok(TokenInner::Comma) = tokens.comma().map(|token| token.inner()) {
+                    let offset = tokens.constant()?.unwrap_constant();
+                    let _ = tokens.left_paren()?;
+                    let r1 = tokens.ident()?.try_into()?;
+                    let _ = tokens.right_paren()?;
+                    Instruction::jalr {
+                        rd: reg,
+                        offset,
+                        r1,
+                    }
+                } else {
+                    Instruction::jalr {
+                        rd: "ra".parse().expect(""),
+                        offset: 0,
+                        r1: reg,
+                    }
+                }
+            }
+            "j" => {
+                let label = tokens.ident()?.unwrap_ident();
+                Instruction::j { label }
+            }
+            "jr" => {
+                let rs = tokens.ident()?.try_into()?;
+                Instruction::jr { rs }
+            }
+            "ret" => Instruction::ret {},
+            other => bail!("unknown instruction: {other}"),
+        }
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn beq() {
-        assert_eq!(
-            Instruction::beq {
-                r1: Register::a0,
-                r2: Register::a0,
-                label: "hello".into()
-            },
-            super::beq("beq a0, a0, hello").unwrap()
-        )
-    }
-
-    #[test]
-    fn addi() {
-        assert_eq!(
-            Instruction::addi {
-                rd: Register::a0,
-                r1: Register::a0,
-                imm: 0x420
-            },
-            super::addi("addi a0, a0, 0x420").unwrap()
-        );
-    }
-
-    #[test]
-    fn ret() {
-        assert_eq!(Instruction::ret {}, super::ret("ret").unwrap())
-    }
-
-    #[test]
-    fn lw() {
-        assert_eq!(
-            Instruction::lw {
-                rd: Register::a0,
-                mem: RegOffset {
-                    reg: Register::a1,
-                    offset: 2
-                }
-            },
-            super::lw("lw a0, 2(a1)").unwrap()
-        )
-    }
-
-    #[test]
-    fn lw_negative() {
-        assert_eq!(
-            Instruction::lw {
-                rd: Register::a0,
-                mem: RegOffset {
-                    reg: Register::a1,
-                    offset: -2
-                }
-            },
-            super::lw("lw a0, -2(a1)").unwrap()
-        );
-        assert_eq!(
-            Instruction::lw {
-                rd: Register::a0,
-                mem: RegOffset {
-                    reg: Register::a1,
-                    offset: -33
-                }
-            },
-            super::lw("lw a0, 0x-21(a1)").unwrap()
-        );
-    }
-
-    #[test]
-    fn addi2() {
-        assert!(parse_program(
-            "addi x0, x0, 1
-        addi x1, x2, 5"
-                .into()
-        )
-        .iter()
-        .all(Result::is_ok));
-        assert!("slli x1, x2, 5".to_owned().parse::<Riscv>().is_ok())
-    }
-
-    #[test]
-    fn lw_whitespace() {
-        assert_eq!(
-            Instruction::lw {
-                rd: Register::a0,
-                mem: RegOffset {
-                    reg: Register::a1,
-                    offset: 2
-                }
-            },
-            super::lw("lw    a0,    2(   a1    )").unwrap()
-        )
-    }
-
-    #[test]
-    fn parse() {
-        let assembly = vec![
-            "li a2, 1",
-            "addi a1, a1, -1",
-            "li a2, 0 # swapped = 0",
-            "li a3, 0 # i = 0",
-            "bge a3, a1, end_for # end the for loop if i >= n",
-            "slli a4, a3, 2 # offset = i << 2 = i * 4",
-            "add a4, a4, a0 # a4 now stores ptr + offset",
-            "lw a5, 0(a4) # p[i]",
-            "lw a6, 4(a4) # p[i+1]",
-            "bge a6, a5, noswap # go to noswap",
-            "mv a7, a5 # tmp = p[i]",
-            "sw a6, 0(a4) # p[i] = p[i+1]",
-            "sw a7, 4(a4) # p[i+1] = p[i]",
-            "li a2, 1 # swapped = 1",
-            "addi sp, sp, -36",
-            "sw a0, 0(sp)",
-            "sw a1, 4(sp)",
-            "sw a2, 8(sp)",
-            "sw a3, 12(sp)",
-            "sw a4, 16(sp)",
-            "sw a5, 20(sp)",
-            "sw a6, 24(sp)",
-            "sw a7, 28(sp)",
-            "sw ra, 32(sp)",
-            "jal arrayViz",
-        ];
-        for line in assembly {
-            println!("{line}");
-            str::parse::<Instruction>(line).unwrap();
-        }
-    }
-
-    #[test]
-    fn big() {
-        let parsed = parse_program(include_str!("test.s").to_owned());
-        for res in parsed.iter() {
-            assert!(res.is_ok())
-        }
-    }
 }
