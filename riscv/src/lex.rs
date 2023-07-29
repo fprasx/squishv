@@ -1,5 +1,6 @@
 use anyhow::bail;
-use std::{fmt::Display, mem, ops::Range};
+use serde::{Deserialize, Serialize};
+use std::{fmt, mem, ops::Range};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenInner<'a> {
@@ -10,10 +11,28 @@ pub enum TokenInner<'a> {
     Minus,
     Constant(i32),
     Ident(&'a str),
-    Comment(&'a str),
+    SlashComment(&'a str),
+    HashComment(&'a str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Display for TokenInner<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenInner::RightParen => write!(f, "("),
+            TokenInner::LeftParen => write!(f, ")"),
+            TokenInner::Comma => write!(f, ","),
+            TokenInner::Colon => write!(f, ":"),
+            TokenInner::Minus => write!(f, "-"),
+            TokenInner::Constant(num) => write!(f, "{}", num),
+            TokenInner::Ident(ident) => write!(f, "{}", ident),
+            TokenInner::HashComment(comment) => write!(f, "'# {}'", comment),
+            TokenInner::SlashComment(comment) => write!(f, "'// {}'", comment),
+        }
+    }
+}
+
+/// Information for where a token occured in the source
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     line: usize,
     columns: Range<usize>,
@@ -25,10 +44,45 @@ impl Span {
     }
 }
 
+impl fmt::Display for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[line {}, columns {:?}]", self.line, self.columns)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token<'a> {
     pub inner: TokenInner<'a>,
     span: Span,
+}
+
+impl fmt::Display for Token<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let span = &self.span;
+        match self.inner {
+            TokenInner::RightParen => {
+                write!(f, ") {span}",)
+            }
+            TokenInner::LeftParen => {
+                write!(f, "( {span}",)
+            }
+            TokenInner::Comma => write!(f, ", {span}",),
+            TokenInner::Colon => write!(f, ": {span}",),
+            TokenInner::Minus => write!(f, "- {span}",),
+            TokenInner::Constant(val) => {
+                write!(f, "{val} {span}",)
+            }
+            TokenInner::Ident(ident) => {
+                write!(f, "'{ident}' {span}",)
+            }
+            TokenInner::HashComment(comment) => {
+                write!(f, "'# {comment}' {span}",)
+            }
+            TokenInner::SlashComment(comment) => {
+                write!(f, "'// {comment}' {span}",)
+            }
+        }
+    }
 }
 
 // Functions for attempting to get a certain token from the lexer. If the next
@@ -36,8 +90,20 @@ pub struct Token<'a> {
 // returned. Otherwise the stream is not advanced.
 macro_rules! parse_token {
     ($($tokenpat:pat => $tokenfn:ident)+) => {
+        // This function ensures that all variants are passed to the macro. If
+        // a variant is not passed in, the match statement below will emit a
+        // `all patterns not covered` error.
+        #[doc(hidden)]
+        fn __parse_token_ensure_all_variants(token: $crate::lex::Token) {
+            use $crate::lex::TokenInner::*;
+            match token.inner() {
+                $(
+                    $tokenpat => panic!("`__parse_token_ensure_all_variants` is not meant to be called"),
+                 )*
+            }
+        }
         $(
-            impl<'a> LexerIter<'a> {
+            impl<'a> Lexer<'a> {
                 pub fn $tokenfn(&mut self) -> ::anyhow::Result<Token<'a>> {
                     use ::anyhow::Context;
                     use $crate::lex::TokenInner::*;
@@ -45,12 +111,12 @@ macro_rules! parse_token {
                         // Unwrap is safe as we already peeked, we just use next
                         // to advance the stream
                         Some(Ok(Token { inner: $tokenpat, .. })) => self.next().unwrap(),
-                        Some(Ok(Token { inner, .. })) => ::anyhow::bail!(
-                            "Expected {}, found {inner}", stringify!($tokentype)
+                        Some(Ok(Token { inner, span })) => ::anyhow::bail!(
+                            "Expected {}, found {inner} at {span}", stringify!($tokenfn),
                         ),
-                        Some(Err(_)) => self.next().unwrap().context(concat!("cannot parse ", stringify!($tokentype))),
+                        Some(Err(_)) => self.next().unwrap().context(concat!("cannot parse ", stringify!($tokenfn))),
                         None => ::anyhow::bail!(
-                            "Expected {}, but ran out of input", stringify!($tokentype)
+                            "Expected {}, but ran out of input", stringify!($tokenfn)
                         ),
                     }
                 }
@@ -68,7 +134,8 @@ parse_token! {
     Minus => minus
     Ident(_) => ident
     Constant(_) => constant
-    Comment(_) => comment
+    HashComment(_) => hash_comment
+    SlashComment(_) => slash_comment
 }
 
 impl<'a> Token<'a> {
@@ -79,38 +146,34 @@ impl<'a> Token<'a> {
         }
     }
 
+    /// Extract the inner token
     pub fn inner(&self) -> TokenInner<'a> {
         self.inner
     }
 
+    /// Extract the span
+    pub fn span(&self) -> Span {
+        self.span.clone()
+    }
+
+    /// Split the token into the inner token and span
+    pub fn split(self) -> (TokenInner<'a>, Span) {
+        (self.inner, self.span)
+    }
+
     /// Extract the string from an ident
-    pub fn unwrap_ident(self) -> &'a str {
+    pub fn unwrap_ident(self) -> (&'a str, Span) {
         match self.inner {
-            TokenInner::Ident(inner) => inner,
+            TokenInner::Ident(inner) => (inner, self.span),
             other => panic!("called unwrap ident on a {other}"),
         }
     }
 
     /// Extract the value of a constant
-    pub fn unwrap_constant(self) -> i32 {
+    pub fn unwrap_constant(self) -> (i32, Span) {
         match self.inner {
-            TokenInner::Constant(inner) => inner,
+            TokenInner::Constant(inner) => (inner, self.span),
             other => panic!("called unwrap ident on a {other}"),
-        }
-    }
-}
-
-impl Display for TokenInner<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TokenInner::RightParen => write!(f, "("),
-            TokenInner::LeftParen => write!(f, ")"),
-            TokenInner::Comma => write!(f, ","),
-            TokenInner::Colon => write!(f, ":"),
-            TokenInner::Minus => write!(f, "-"),
-            TokenInner::Constant(num) => write!(f, "{}", num),
-            TokenInner::Ident(ident) => write!(f, "{}", ident),
-            TokenInner::Comment(ident) => write!(f, "'# {}'", ident),
         }
     }
 }
@@ -118,19 +181,29 @@ impl Display for TokenInner<'_> {
 type LexResult<'a> = anyhow::Result<Token<'a>>;
 
 /// Low level lexer that can be turned into a peekable iterator over tokens.
-pub struct Lexer<'a> {
+/// There are a couple reasons this lexer should not be used directly:
+///  - it is not peekable
+///  - if it errors, it will just keep returning that error
+/// The `Lexer` type wraps a `RawLexer` and takes cares of these things.
+/// However, it is still nice to have actual lexing functionality abstracted
+/// away in one place.
+struct RawLexer<'a> {
     buf: &'a str,
     line: usize,
     char: usize,
 }
 
-impl<'a> Lexer<'a> {
+impl<'a> RawLexer<'a> {
     pub fn new(buf: &'a str) -> Self {
-        Lexer {
+        RawLexer {
             buf,
             line: 1,
             char: 1,
         }
+    }
+
+    fn finished(&self) -> bool {
+        self.buf.is_empty()
     }
 
     /// Gobble whitespace and update internal line/char positions
@@ -193,7 +266,7 @@ impl<'a> Lexer<'a> {
         } else if let Some(rest) = self.buf.strip_prefix('#') {
             let text = rest.consume(|c| c != '\n').unwrap_or("");
             Ok(Token::new(
-                TokenInner::Comment(text),
+                TokenInner::HashComment(text),
                 line,
                 // Add 1 for the '#'
                 self.advance(text.len() + 1),
@@ -201,7 +274,7 @@ impl<'a> Lexer<'a> {
         } else if let Some(rest) = self.buf.strip_prefix("//") {
             let text = rest.consume(|c| c != '\n').unwrap_or("");
             Ok(Token::new(
-                TokenInner::Comment(text),
+                TokenInner::SlashComment(text),
                 line,
                 // Add 2 for the "//"
                 self.advance(text.len() + 2),
@@ -263,24 +336,35 @@ impl<'a> Lexer<'a> {
     }
 }
 
-pub struct LexerIter<'a> {
-    inner: Lexer<'a>,
+/// A peekable iterator over tokens. If an error is returned, the `Lexer` will
+/// stop iteration afterwards.
+pub struct Lexer<'a> {
+    inner: RawLexer<'a>,
     errored: bool,
     peek: Option<LexResult<'a>>,
 }
 
-impl<'a> LexerIter<'a> {
+impl<'a> Lexer<'a> {
+    pub fn new(source: &'a str) -> Self {
+        let mut inner = RawLexer::new(source);
+        let peek = inner.next_from_buf();
+        Lexer {
+            inner,
+            errored: false,
+            peek,
+        }
+    }
+
     pub fn peek(&mut self) -> Option<&LexResult<'a>> {
         self.peek.as_ref()
     }
 
-    pub fn new(mut lexer: Lexer<'a>) -> Self {
-        let next = lexer.next_from_buf();
-        LexerIter { inner: lexer, errored: false, peek: next }
+    pub fn finished(&self) -> bool {
+        self.inner.finished()
     }
 }
 
-impl<'a> Iterator for LexerIter<'a> {
+impl<'a> Iterator for Lexer<'a> {
     type Item = anyhow::Result<Token<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -297,14 +381,14 @@ impl<'a> Iterator for LexerIter<'a> {
     }
 }
 
-impl<'a> IntoIterator for Lexer<'a> {
+impl<'a> IntoIterator for RawLexer<'a> {
     type Item = anyhow::Result<Token<'a>>;
 
-    type IntoIter = LexerIter<'a>;
+    type IntoIter = Lexer<'a>;
 
     fn into_iter(mut self) -> Self::IntoIter {
         let peek = self.next_from_buf();
-        LexerIter {
+        Lexer {
             inner: self,
             errored: false,
             peek,
@@ -360,15 +444,15 @@ mod tests {
     }
 
     #[test]
-    fn lex_empty() {
-        let mut lexer = Lexer::new("").into_iter();
+    fn empty() {
+        let mut lexer = Lexer::new("");
         assert!(lexer.peek().is_none());
         assert!(lexer.next().is_none());
     }
 
     #[test]
-    fn lex_error_returned_once() {
-        let mut lexer = Lexer::new("&%^*").into_iter();
+    fn error_returned_once() {
+        let mut lexer = Lexer::new("&%^*");
         assert!(matches!(lexer.next(), Some(Err(_))));
         assert!(lexer.next().is_none())
     }
@@ -378,11 +462,11 @@ mod tests {
         let tokens = Lexer::new(indoc! {"
             - , : ( )
             addi # and slli :)
+            // slashy slash
             checka:
             loopa:
             69 -42 0xff
         "})
-        .into_iter()
         .map(|token| token.unwrap())
         .collect::<Vec<_>>();
         assert_eq!(
@@ -394,45 +478,45 @@ mod tests {
                 Token::new(TokenInner::LeftParen, 1, 7..8),
                 Token::new(TokenInner::RightParen, 1, 9..10),
                 Token::new(TokenInner::Ident("addi"), 2, 1..5),
-                Token::new(TokenInner::Comment(" and slli :)"), 2, 6..19),
-                Token::new(TokenInner::Ident("checka"), 3, 1..7),
-                Token::new(TokenInner::Colon, 3, 7..8),
-                Token::new(TokenInner::Ident("loopa"), 4, 1..6),
-                Token::new(TokenInner::Colon, 4, 6..7),
-                Token::new(TokenInner::Constant(69), 5, 1..3),
-                Token::new(TokenInner::Minus, 5, 4..5),
-                Token::new(TokenInner::Constant(42), 5, 5..7),
-                Token::new(TokenInner::Constant(255), 5, 8..12),
+                Token::new(TokenInner::HashComment(" and slli :)"), 2, 6..19),
+                Token::new(TokenInner::SlashComment(" slashy slash"), 3, 1..16),
+                Token::new(TokenInner::Ident("checka"), 4, 1..7),
+                Token::new(TokenInner::Colon, 4, 7..8),
+                Token::new(TokenInner::Ident("loopa"), 5, 1..6),
+                Token::new(TokenInner::Colon, 5, 6..7),
+                Token::new(TokenInner::Constant(69), 6, 1..3),
+                Token::new(TokenInner::Minus, 6, 4..5),
+                Token::new(TokenInner::Constant(42), 6, 5..7),
+                Token::new(TokenInner::Constant(255), 6, 8..12),
             ]
         );
     }
 
     #[test]
-    fn the_big_file() {
-        assert!(Lexer::new(include_str!("test.s"))
-            .into_iter()
-            .all(|token| token.is_ok()))
+    fn fuzz() {
+        assert!(Lexer::new(include_str!("../tests/test.s")).all(|token| token.is_ok()));
+        assert!(Lexer::new(include_str!("../tests/random.s")).all(|token| token.is_ok()));
     }
 
     #[test]
     fn gobble_whitespace() {
-        let mut lexer = Lexer::new("");
+        let mut lexer = RawLexer::new("");
         lexer.gobble_whitespace();
         assert_eq!(lexer.char, 1);
         assert_eq!(lexer.line, 1);
 
-        let mut lexer = Lexer::new("   ");
+        let mut lexer = RawLexer::new("   ");
         //                          123
         lexer.gobble_whitespace();
         assert_eq!(lexer.char, 4);
         assert_eq!(lexer.line, 1);
 
-        let mut lexer = Lexer::new("\n\n");
+        let mut lexer = RawLexer::new("\n\n");
         lexer.gobble_whitespace();
         assert_eq!(lexer.char, 1);
         assert_eq!(lexer.line, 3);
 
-        let mut lexer = Lexer::new("   \n  \n    ");
+        let mut lexer = RawLexer::new("   \n  \n    ");
         //                          123  12  1234
         lexer.gobble_whitespace();
         assert_eq!(lexer.char, 5);
