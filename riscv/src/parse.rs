@@ -270,7 +270,7 @@ impl<'a> Item<'a> {
     /// Access the inner instruction. Panic if not called on an instruction.
     pub fn get_instruction(&self) -> &Instruction<'a> {
         match self {
-            Item::Instruction(i) => &i,
+            Item::Instruction(i) => i,
             Item::Label { .. } => unreachable!("unwrap_instruction called on label"),
         }
     }
@@ -468,7 +468,7 @@ pub fn parse_item<'a>(tokens: &mut Lexer<'a>) -> ParseResult<'a> {
                     let label = tokens.ident()?.unwrap_ident().0;
                     Instruction::jal { rd, label }
                 } else {
-                    // Assume register is rd
+                    // Assume register is ra
                     Instruction::jal {
                         rd: "ra".parse().expect(""),
                         label: ident.unwrap_ident().0,
