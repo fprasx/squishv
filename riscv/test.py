@@ -83,11 +83,19 @@ if __name__ == "__main__":
         label = random_label()
         items.append(f"{label}:")
         items.append(f"jal {rd}, {label}")
+        label = random_label()
+        # register not provided variant, ra assumed
+        label = random_label()
+        items.append(f"{label}:")
+        items.append(f"jal {label}")
 
         # jalr        { rd: register, offset: i32, r1: register },
         rd, r1 = random.choices(regs, k=2)
         num = random_num()
         items.append(f"jalr {rd}, {num}({r1})")
+        # register not provided variant, ra assumed
+        rd = random.choice(regs)
+        items.append(f"jalr {rd}")
 
         # j           { label: &'a str },
         label = random_label()
