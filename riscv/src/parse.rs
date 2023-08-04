@@ -517,10 +517,10 @@ pub fn parse_item<'a>(tokens: &mut Lexer<'a>) -> ParseResult<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program<'a> {
-    // The values of this map are indices into `items`. They point to the item
-    // in items corresponding to the label with the keyed name.
+    // The values of this map are indices into `asm`. They point to the instruction
+    // in `asm` corresponding to the label with the keyed name.
     labels: HashMap<&'a str, usize>,
-    items: Vec<Item<'a>>,
+    asm: Vec<Instruction<'a>>,
 }
 
 impl<'a> Program<'a> {
@@ -529,6 +529,7 @@ impl<'a> Program<'a> {
         let mut items = vec![];
         let mut lexer = Lexer::new(source);
         while !lexer.finished() {
+            // Context should be handled by caller
             items.push(parse_item(&mut lexer)?);
         }
         Ok(items)
@@ -552,7 +553,10 @@ impl<'a> Program<'a> {
             }
         }
 
+        // We'll aggregate all errors onto this bad boy
         let mut errors: Vec<String> = vec![];
+
+        // Make sure each label is defined at most once
         for (name, spans) in labels2spans.iter() {
             if spans.len() != 1 {
                 let mut error = format!("label <{name}> defined multiple times at:\n");
@@ -567,8 +571,11 @@ impl<'a> Program<'a> {
             }
         }
 
-        for (pc, instr) in items.iter().enumerate() {
+        // Make sure each label is actually defined somewhere
+        let mut count = 0;
+        for instr in items.iter() {
             let Item::Instruction(instr) = instr else {
+                count += 1;
                 continue;
             };
             let label = match instr {
@@ -597,8 +604,7 @@ impl<'a> Program<'a> {
                 errors.push(format!(
                     // pad with 10 zeroes because the 0x prefix takes up 2 chars
                     "undefined label <{label}> at pc {:#010x}: {}",
-                    pc * 4,
-                    instr
+                    count, instr
                 ))
             }
         }
@@ -608,17 +614,27 @@ impl<'a> Program<'a> {
         }
 
         Ok(Program {
-            items,
+            asm: items
+                .into_iter()
+                .filter_map(|item| {
+                    if let Item::Instruction(asm) = item {
+                        Some(asm)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
             labels: labels2pcs,
         })
     }
 
-    pub fn at<'prog>(&'prog self, label: &str) -> Option<&'prog Instruction> {
-        return self
-            .labels
-            .get(label)
-            .and_then(|pc| self.items.get(*pc))
-            .map(Item::get_instruction);
+    pub fn at(&self, pc: i32) -> Option<&Instruction> {
+        assert!(pc % 4 == 0);
+        self.asm.get((pc / 4) as usize)
+    }
+
+    pub fn label<'prog>(&'prog self, label: &str) -> Option<&'prog Instruction> {
+        return self.labels.get(label).and_then(|pc| self.asm.get(*pc));
     }
 }
 
@@ -639,7 +655,7 @@ mod tests {
         assert_eq!(
             Program::parse("").unwrap(),
             Program {
-                items: vec![],
+                asm: vec![],
                 labels: map![]
             }
         )
@@ -656,24 +672,7 @@ mod tests {
             "})
             .unwrap(),
             Program {
-                items: vec![
-                    Item::Label {
-                        name: "checka",
-                        span: Span::new(1, 1..7)
-                    },
-                    Item::Label {
-                        name: "loopa",
-                        span: Span::new(2, 1..6)
-                    },
-                    Item::Label {
-                        name: "checkb",
-                        span: Span::new(3, 1..7)
-                    },
-                    Item::Label {
-                        name: "loopb",
-                        span: Span::new(4, 1..6)
-                    },
-                ],
+                asm: vec![],
                 labels: map![
                     "checka" => 0,
                     "loopa"=> 1,
@@ -704,7 +703,7 @@ mod tests {
 
     #[test]
     fn instructions() {
-        let program = Program::parse(indoc! {""}).unwrap();
+        Program::parse(indoc! {""}).unwrap();
     }
 
     #[test]
@@ -724,25 +723,21 @@ mod tests {
             "})
             .unwrap(),
             Program {
-                items: vec![
-                    Item::Instruction(Instruction::addi {
+                asm: vec![
+                    Instruction::addi {
                         rd: Register::x0,
                         r1: Register::sp,
                         imm: 1
-                    }),
-                    Item::Instruction(Instruction::addi {
+                    },
+                    Instruction::addi {
                         rd: Register::x0,
                         r1: Register::sp,
                         imm: 2
-                    }),
-                    Item::Label {
-                        name: "label",
-                        span: Span::new(3, 1..6)
                     },
-                    Item::Instruction(Instruction::beqz {
+                    Instruction::beqz {
                         r1: Register::a0,
                         label: "label"
-                    }),
+                    },
                 ],
                 labels: map![
                     "label"=> 2,
