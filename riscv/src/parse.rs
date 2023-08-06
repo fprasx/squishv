@@ -195,6 +195,104 @@ impl Display for LoadOp {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BranchOp {
+    Beq,
+    Bne,
+    Blt,
+    Bge,
+    Bltu,
+    Bgeu,
+    Bgt,
+    Ble,
+    Bgtu,
+    Bleu,
+}
+
+impl FromStr for BranchOp {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "beq" => Ok(BranchOp::Beq),
+            "bne" => Ok(BranchOp::Bne),
+            "blt" => Ok(BranchOp::Blt),
+            "bge" => Ok(BranchOp::Bge),
+            "bltu" => Ok(BranchOp::Bltu),
+            "bgeu" => Ok(BranchOp::Bgeu),
+            "bgt" => Ok(BranchOp::Bgt),
+            "ble" => Ok(BranchOp::Ble),
+            "bgtu" => Ok(BranchOp::Bgtu),
+            "bleu" => Ok(BranchOp::Bleu),
+            other => bail!("unknown branch operation: {other}"),
+        }
+    }
+}
+
+impl Display for BranchOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                BranchOp::Beq => "beq",
+                BranchOp::Bne => "bne",
+                BranchOp::Blt => "blt",
+                BranchOp::Bge => "bge",
+                BranchOp::Bltu => "bltu",
+                BranchOp::Bgeu => "bgeu",
+                BranchOp::Bgt => "bgt",
+                BranchOp::Ble => "ble",
+                BranchOp::Bgtu => "bgtu",
+                BranchOp::Bleu => "bleu",
+            }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BranchZeroOp {
+    Beqz,
+    Bnez,
+    Bltz,
+    Bgez,
+    Bgtz,
+    Blez,
+}
+
+impl FromStr for BranchZeroOp {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "beqz" => Ok(BranchZeroOp::Beqz),
+            "bnez" => Ok(BranchZeroOp::Bnez),
+            "bltz" => Ok(BranchZeroOp::Bltz),
+            "bgez" => Ok(BranchZeroOp::Bgez),
+            "bgtz" => Ok(BranchZeroOp::Bgtz),
+            "blez" => Ok(BranchZeroOp::Blez),
+            other => bail!("unknown zero branch operation: {other}"),
+        }
+    }
+}
+
+impl Display for BranchZeroOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                BranchZeroOp::Beqz => "beqz",
+                BranchZeroOp::Bnez => "bnez",
+                BranchZeroOp::Bltz => "bltz",
+                BranchZeroOp::Bgez => "bgez",
+                BranchZeroOp::Bgtz => "bgtz",
+                BranchZeroOp::Blez => "blez",
+            }
+        )
+    }
+}
+
 #[rustfmt::skip]
 #[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone, Copy)]
@@ -227,28 +325,14 @@ pub enum Instruction<'a> {
     store {r2: Register, offset: i32, r1: Register, op: StoreOp },
 
     // Branches + some fake branches
-    beq  { r1: Register, r2: Register, label: &'a str },
-    bne  { r1: Register, r2: Register, label: &'a str },
-    blt  { r1: Register, r2: Register, label: &'a str },
-    bge  { r1: Register, r2: Register, label: &'a str },
-    bltu { r1: Register, r2: Register, label: &'a str },
-    bgeu { r1: Register, r2: Register, label: &'a str },
-    bgt  { r1: Register, r2: Register, label: &'a str },
-    ble  { r1: Register, r2: Register, label: &'a str },
-    bgtu { r1: Register, r2: Register, label: &'a str },
-    bleu { r1: Register, r2: Register, label: &'a str },
+    branch  { r1: Register, r2: Register, label: &'a str, op: BranchOp },
 
     // Loady bois
     lui { rd: Register, imm: i32, },
     li  { rd: Register, imm: i32, },
 
     // 0-branches
-    beqz { r1: Register, label: &'a str },
-    bnez { r1: Register, label: &'a str },
-    bltz { r1: Register, label: &'a str },
-    bgez { r1: Register, label: &'a str },
-    bgtz { r1: Register, label: &'a str },
-    blez { r1: Register, label: &'a str },
+    branchZero { r1: Register, label: &'a str, op: BranchZeroOp },
 
     // Unaries
     mv  { rd: Register, r1: Register },
@@ -290,24 +374,10 @@ impl<'a> fmt::Display for Instruction<'a> {
             Instruction::and { rd, r1, r2 } => write!(f, "and {rd}, {r1}, {r2}"),
             Instruction::load { rd, offset, r1, op } => write!(f, "{op} {rd}, {offset}({r1})"),
             Instruction::store { r2, offset, r1, op } => write!(f, "{op} {r2}, {offset}({r1})"),
-            Instruction::beq { r1, r2, label } => write!(f, "beq {r1}, {r2}, {label}"),
-            Instruction::bne { r1, r2, label } => write!(f, "bne {r1}, {r2}, {label}"),
-            Instruction::blt { r1, r2, label } => write!(f, "blt {r1}, {r2}, {label}"),
-            Instruction::bge { r1, r2, label } => write!(f, "bge {r1}, {r2}, {label}"),
-            Instruction::bltu { r1, r2, label } => write!(f, "bltu {r1}, {r2}, {label}"),
-            Instruction::bgeu { r1, r2, label } => write!(f, "bgeuw {r1}, {r2}, {label}"),
-            Instruction::bgt { r1, r2, label } => write!(f, "bgt {r1}, {r2}, {label}"),
-            Instruction::ble { r1, r2, label } => write!(f, "ble {r1}, {r2}, {label}"),
-            Instruction::bgtu { r1, r2, label } => write!(f, "bgtu {r1}, {r2}, {label}"),
-            Instruction::bleu { r1, r2, label } => write!(f, "bleu {r1}, {r2}, {label}"),
+            Instruction::branch { r1, r2, label, op } => write!(f, "{op} {r1}, {r2}, {label}"),
             Instruction::lui { rd, imm } => write!(f, "lui {rd} {imm}"),
             Instruction::li { rd, imm } => write!(f, "li {rd} {imm}"),
-            Instruction::beqz { r1, label } => write!(f, "beqz {r1}, {label}"),
-            Instruction::bnez { r1, label } => write!(f, "bnez {r1}, {label}"),
-            Instruction::bltz { r1, label } => write!(f, "bltz {r1}, {label}"),
-            Instruction::bgez { r1, label } => write!(f, "bgez {r1}, {label}"),
-            Instruction::bgtz { r1, label } => write!(f, "bgtz {r1}, {label}"),
-            Instruction::blez { r1, label } => write!(f, "blez {r1}, {label}"),
+            Instruction::branchZero { r1, label, op } => write!(f, "{op} {r1}, {label}"),
             Instruction::mv { rd, r1 } => write!(f, "mv {rd}, {r1}"),
             Instruction::not { rd, r1 } => write!(f, "mv {rd}, {r1}"),
             Instruction::neg { rd, r1 } => write!(f, "mv {rd}, {r1}"),
@@ -435,31 +505,24 @@ impl<'a> Lexer<'a> {
             let r2 = self.ident()?.try_into()?;
             let _ = self.comma()?;
             let label = self.ident()?.unwrap_ident().0;
-            match ident {
-                "beq" => Instruction::beq { r1, r2, label },
-                "bne" => Instruction::bne { r1, r2, label },
-                "blt" => Instruction::blt { r1, r2, label },
-                "bge" => Instruction::bge { r1, r2, label },
-                "bltu" => Instruction::bltu { r1, r2, label },
-                "bgeu" => Instruction::bgeu { r1, r2, label },
-                "bgt" => Instruction::bgt { r1, r2, label },
-                "ble" => Instruction::ble { r1, r2, label },
-                "bgtu" => Instruction::bgtu { r1, r2, label },
-                "bleu" => Instruction::bleu { r1, r2, label },
-                other => panic!("unknown branch instruction: {other}"),
+            Instruction::branch {
+                r1,
+                r2,
+                label,
+                op: ident
+                    .parse()
+                    .context("faile to parse identifier as branch op")?,
             }
         } else if is_branch_zero(ident) {
             let r1 = self.ident()?.try_into()?;
             let _ = self.comma()?;
             let label = self.ident()?.unwrap_ident().0;
-            match ident {
-                "beqz" => Instruction::beqz { r1, label },
-                "bnez" => Instruction::bnez { r1, label },
-                "bltz" => Instruction::bltz { r1, label },
-                "bgez" => Instruction::bgez { r1, label },
-                "bgtz" => Instruction::bgtz { r1, label },
-                "blez" => Instruction::blez { r1, label },
-                other => panic!("unkown branch-zero instruction: {other}"),
+            Instruction::branchZero {
+                r1,
+                label,
+                op: ident
+                    .parse()
+                    .context("failed to parse identifier as zero branch op")?,
             }
         } else if is_unary(ident) {
             let rd = self.ident()?.try_into()?;
@@ -469,7 +532,7 @@ impl<'a> Lexer<'a> {
                 "mv" => Instruction::mv { rd, r1 },
                 "not" => Instruction::not { rd, r1 },
                 "neg" => Instruction::neg { rd, r1 },
-                other => panic!("unkown unary instruction: {other}"),
+                other => panic!("unknown unary instruction: {other}"),
             }
         } else if is_store_op(ident) || is_load_op(ident) {
             let reg = self.ident()?.try_into()?;
@@ -647,22 +710,8 @@ impl<'a> Program<'a> {
                 continue;
             };
             let label = match instr {
-                Instruction::beq { label, .. } => label,
-                Instruction::bne { label, .. } => label,
-                Instruction::blt { label, .. } => label,
-                Instruction::bge { label, .. } => label,
-                Instruction::bltu { label, .. } => label,
-                Instruction::bgeu { label, .. } => label,
-                Instruction::bgt { label, .. } => label,
-                Instruction::ble { label, .. } => label,
-                Instruction::bgtu { label, .. } => label,
-                Instruction::bleu { label, .. } => label,
-                Instruction::beqz { label, .. } => label,
-                Instruction::bnez { label, .. } => label,
-                Instruction::bltz { label, .. } => label,
-                Instruction::bgez { label, .. } => label,
-                Instruction::bgtz { label, .. } => label,
-                Instruction::blez { label, .. } => label,
+                Instruction::branch { label, .. } => label,
+                Instruction::branchZero { label, .. } => label,
                 Instruction::call { label } => label,
                 Instruction::jal { label, .. } => label,
                 Instruction::j { label } => label,
@@ -806,9 +855,10 @@ mod tests {
                         r1: Register::sp,
                         imm: 2
                     },
-                    Instruction::beqz {
+                    Instruction::branchZero {
                         r1: Register::a0,
-                        label: "label"
+                        label: "label",
+                        op: BranchZeroOp::Beqz
                     },
                 ],
                 labels: map![
