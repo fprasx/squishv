@@ -321,18 +321,18 @@ pub enum Instruction<'a> {
     and  { rd: Register, r1: Register, r2: Register },
 
     // Memory
-    load {rd: Register, offset: i32, r1: Register, op: LoadOp },
-    store {r2: Register, offset: i32, r1: Register, op: StoreOp },
+    Load {rd: Register, offset: i32, r1: Register, op: LoadOp },
+    Store {r2: Register, offset: i32, r1: Register, op: StoreOp },
 
     // Branches + some fake branches
-    branch  { r1: Register, r2: Register, label: &'a str, op: BranchOp },
+    Branch  { r1: Register, r2: Register, label: &'a str, op: BranchOp },
 
     // Loady bois
     lui { rd: Register, imm: i32, },
     li  { rd: Register, imm: i32, },
 
     // 0-branches
-    branchZero { r1: Register, label: &'a str, op: BranchZeroOp },
+    BranchZero { r1: Register, label: &'a str, op: BranchZeroOp },
 
     // Unaries
     mv  { rd: Register, r1: Register },
@@ -372,12 +372,12 @@ impl<'a> fmt::Display for Instruction<'a> {
             Instruction::sra { rd, r1, r2 } => write!(f, "sra {rd}, {r1}, {r2}"),
             Instruction::or { rd, r1, r2 } => write!(f, "or {rd}, {r1}, {r2}"),
             Instruction::and { rd, r1, r2 } => write!(f, "and {rd}, {r1}, {r2}"),
-            Instruction::load { rd, offset, r1, op } => write!(f, "{op} {rd}, {offset}({r1})"),
-            Instruction::store { r2, offset, r1, op } => write!(f, "{op} {r2}, {offset}({r1})"),
-            Instruction::branch { r1, r2, label, op } => write!(f, "{op} {r1}, {r2}, {label}"),
+            Instruction::Load { rd, offset, r1, op } => write!(f, "{op} {rd}, {offset}({r1})"),
+            Instruction::Store { r2, offset, r1, op } => write!(f, "{op} {r2}, {offset}({r1})"),
+            Instruction::Branch { r1, r2, label, op } => write!(f, "{op} {r1}, {r2}, {label}"),
             Instruction::lui { rd, imm } => write!(f, "lui {rd} {imm}"),
             Instruction::li { rd, imm } => write!(f, "li {rd} {imm}"),
-            Instruction::branchZero { r1, label, op } => write!(f, "{op} {r1}, {label}"),
+            Instruction::BranchZero { r1, label, op } => write!(f, "{op} {r1}, {label}"),
             Instruction::mv { rd, r1 } => write!(f, "mv {rd}, {r1}"),
             Instruction::not { rd, r1 } => write!(f, "mv {rd}, {r1}"),
             Instruction::neg { rd, r1 } => write!(f, "mv {rd}, {r1}"),
@@ -505,7 +505,7 @@ impl<'a> Lexer<'a> {
             let r2 = self.ident()?.try_into()?;
             let _ = self.comma()?;
             let label = self.ident()?.unwrap_ident().0;
-            Instruction::branch {
+            Instruction::Branch {
                 r1,
                 r2,
                 label,
@@ -517,7 +517,7 @@ impl<'a> Lexer<'a> {
             let r1 = self.ident()?.try_into()?;
             let _ = self.comma()?;
             let label = self.ident()?.unwrap_ident().0;
-            Instruction::branchZero {
+            Instruction::BranchZero {
                 r1,
                 label,
                 op: ident
@@ -546,7 +546,7 @@ impl<'a> Lexer<'a> {
             let r1 = self.ident()?.try_into()?;
             let _ = self.right_paren()?;
             if is_store_op(ident) {
-                Instruction::store {
+                Instruction::Store {
                     r2: reg,
                     offset,
                     r1,
@@ -555,7 +555,7 @@ impl<'a> Lexer<'a> {
                         .context("failed to parse identifier as store op")?,
                 }
             } else {
-                Instruction::load {
+                Instruction::Load {
                     rd: reg,
                     offset,
                     r1,
@@ -710,8 +710,8 @@ impl<'a> Program<'a> {
                 continue;
             };
             let label = match instr {
-                Instruction::branch { label, .. } => label,
-                Instruction::branchZero { label, .. } => label,
+                Instruction::Branch { label, .. } => label,
+                Instruction::BranchZero { label, .. } => label,
                 Instruction::call { label } => label,
                 Instruction::jal { label, .. } => label,
                 Instruction::j { label } => label,
@@ -855,7 +855,7 @@ mod tests {
                         r1: Register::sp,
                         imm: 2
                     },
-                    Instruction::branchZero {
+                    Instruction::BranchZero {
                         r1: Register::a0,
                         label: "label",
                         op: BranchZeroOp::Beqz
