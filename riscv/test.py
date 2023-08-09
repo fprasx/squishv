@@ -69,7 +69,7 @@ if __name__ == "__main__":
             r1, r2 = random.choices(regs, k=2)
             items.append(f"{i} {r1}, {r2}")
 
-        for i in ["lw", "lh", "lb", "sw", "sh", "sb"]:
+        for i in ["lw", "lh", "lb", "lhu", "lbu", "sw", "sh", "sb"]:
             r1, r2 = random.choices(regs, k=2)
             num = random_num()
             items.append(f"{i} {r1}, {num}({r2})")
