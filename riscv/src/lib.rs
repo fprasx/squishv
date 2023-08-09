@@ -14,3 +14,11 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 pub fn helloworld() -> JsValue {
     serde_wasm_bindgen::to_value(&"Hello from Rust!").unwrap()
 }
+
+// vec! like syntax for a hashmap
+#[macro_export]
+macro_rules! map {
+    ($($key:expr => $val:expr),* $(,)?) => {
+        ::std::collections::HashMap::from([$((($key, $val)),)*])
+    };
+}
