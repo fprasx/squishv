@@ -7,10 +7,16 @@ import sys
 
 alphabet = "abcdefghijklmnopqrstuvwxyz_"
 
+with open("/usr/share/dict/words", "r") as f:
+    words = list(filter(lambda word:
+                        len(word) < 5
+                        and "'" not in word
+                        and word.islower(),
+                 map(lambda s: s.strip(), f.readlines())))
+
 
 def random_label():
-    return ''.join(random.choice(alphabet)
-                   for _ in range(random.randrange(5, 10)))
+    return random.choice(words)
 
 
 def random_num():
