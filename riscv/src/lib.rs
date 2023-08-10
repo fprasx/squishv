@@ -19,6 +19,6 @@ pub fn helloworld() -> JsValue {
 #[macro_export]
 macro_rules! map {
     ($($key:expr => $val:expr),* $(,)?) => {
-        ::std::collections::HashMap::from([$((($key, $val)),)*])
+        ::std::collections::HashMap::from([$(($key, $val),)*])
     };
 }
