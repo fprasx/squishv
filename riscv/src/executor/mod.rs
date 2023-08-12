@@ -16,10 +16,21 @@ use crate::parse::{
 /// Take a snapshot of the registers every `SNAPSHOT_INTERVAL` instructions.
 pub const SNAPSHOT_INTERVAL: usize = 1000;
 
+#[rustfmt::skip]
+pub const REGISTERS: [Register; 32] = {
+    use Register::*;
+    [
+        x0, ra, sp, gp, tp,
+        t0, t1, t2, t3, t4, t5, t6,
+        a0, a1, a2, a3, a4, a5, a6, a7,
+        s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11,
+    ]
+};
+
 /// A snapshot of the registers at one point in time.
 #[rustfmt::skip]
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
-struct RegisterSnapshot {
+pub struct RegisterSnapshot {
     pc: i32,
     
     x0: i32, ra: i32, sp: i32, gp: i32, tp: i32,
@@ -96,7 +107,7 @@ register_index_impl! {
     s0 s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum OverflowBehaviour {
     Wrap,
     Saturate,
@@ -104,14 +115,15 @@ pub enum OverflowBehaviour {
     Trap,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Config {
     /// What to do when overflow happens.
     overflow_mode: OverflowBehaviour,
 }
 
-#[derive(Debug)]
-pub struct Executor<'a> {
+// TODO: use Rc/Arc to make cloning cheaper?
+#[derive(Debug, Clone)]
+pub struct Executor {
     config: Config,
 
     /// The PC of the next instruction to execute
@@ -120,8 +132,8 @@ pub struct Executor<'a> {
     /// The number of instructions executed - used to uniquely identify points
     /// in program execution.
     executed: usize,
-    program: Program<'a>,
-    regfile: RegisterSnapshot,
+    program: Program,
+    pub regfile: RegisterSnapshot,
 
     /// Used to store snapshots of the programs state at a certain point in time
     /// for ttd (time-travel debugging)
@@ -150,8 +162,8 @@ enum Diff {
     Register { reg: Register, val: i32 },
 }
 
-impl<'a> Executor<'a> {
-    pub fn new(program: Program<'a>) -> Self {
+impl Executor {
+    pub fn new(program: Program) -> Self {
         Self {
             config: Config {
                 overflow_mode: OverflowBehaviour::Trap,
@@ -217,11 +229,11 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    pub fn execute(&mut self) -> Option<anyhow::Result<Update>> {
+    pub fn execute(&mut self, regs: &RegisterSnapshot) -> Option<anyhow::Result<Update>> {
         if self.program.at(self.pc).is_none() {
             None
         } else {
-            Some(self._execute())
+            Some(self._execute(regs))
         }
     }
 
@@ -230,7 +242,7 @@ impl<'a> Executor<'a> {
     // wrapper around this function that first checks if we are done executing,
     // and as such returns an Option<Result<Update>> - making the ? only useful
     // for options.
-    fn _execute(&mut self) -> anyhow::Result<Update> {
+    fn _execute(&mut self, regs: &RegisterSnapshot) -> anyhow::Result<Update> {
         // See contract for calling funtion
         let asm = self
             .program
@@ -248,7 +260,6 @@ impl<'a> Executor<'a> {
         // TODO: move the state changes after execution in case there was an error
         self.executed += 1;
 
-        let regs = &self.regfile;
         let pc = self.pc;
 
         // Helper functions for producing the update
@@ -272,9 +283,10 @@ impl<'a> Executor<'a> {
 
         // Some notes:
         // * we mask shift amounts
-        let update = match *asm {
+        let update = match asm {
             // TODO: make sure to test arithmetic/logical shifting
             Instruction::RegImm { rd, r1, imm, op } => {
+                let imm = *imm;
                 let r1val = regs[r1];
                 let val = match op {
                     RegImmOp::Addi => self
@@ -305,7 +317,7 @@ impl<'a> Executor<'a> {
                     RegImmOp::Ori => regs[r1] | imm,
                     RegImmOp::Andi => regs[r1] & imm,
                 };
-                next_with(rd, val)
+                next_with(*rd, val)
             }
             Instruction::RegReg { rd, r1, r2, op } => {
                 let r1val = regs[r1];
@@ -342,30 +354,30 @@ impl<'a> Executor<'a> {
                     RegRegOp::Or => r1val | r2val,
                     RegRegOp::And => r1val & r2val,
                 };
-                next_with(rd, val)
+                next_with(*rd, val)
             }
             Instruction::Load { rd, offset, r1, op } => {
-                let addr = self.add(offset, regs[r1]).with_context(|| {
+                let addr = self.add(*offset, regs[r1]).with_context(|| {
                     format!(
                         "failed to calculate address: {r1} = {}, offset = {offset}",
                         regs[r1]
                     )
                 })?;
                 next_with(
-                    rd,
+                    *rd,
                     self.memory
-                        .load(addr, op)
+                        .load(addr, *op)
                         .context("failed to perform load")?,
                 )
             }
             Instruction::Store { r2, offset, r1, op } => {
-                let addr = self.add(offset, regs[r1]).with_context(|| {
+                let addr = self.add(*offset, regs[r1]).with_context(|| {
                     format!(
                         "failed to calculate address: {r1} = {}, offset = {offset}",
                         regs[r1]
                     )
                 })?;
-                next_mem(addr, regs[r2], op)
+                next_mem(addr, regs[r2], *op)
             }
             Instruction::Branch { r1, r2, label, op } => {
                 let jump = match op {
@@ -381,7 +393,7 @@ impl<'a> Executor<'a> {
                     BranchOp::Bleu => (regs[r1] as u32) <= (regs[r2] as u32),
                 };
                 if jump {
-                    Update::jump(self.program.label(label).unwrap().1)
+                    Update::jump(self.program.label(&label).unwrap().1)
                 } else {
                     next
                 }
@@ -396,7 +408,7 @@ impl<'a> Executor<'a> {
                     BranchZeroOp::Blez => regs[r1] <= 0,
                 };
                 if jump {
-                    Update::jump(self.program.label(label).unwrap().1)
+                    Update::jump(self.program.label(&label).unwrap().1)
                 } else {
                     next
                 }
@@ -404,9 +416,9 @@ impl<'a> Executor<'a> {
             Instruction::LoadImm { rd, imm, op } => {
                 let val = match op {
                     LoadImmOp::Lui => imm << 12,
-                    LoadImmOp::Li => imm,
+                    LoadImmOp::Li => *imm,
                 };
-                next_with(rd, val)
+                next_with(*rd, val)
             }
             Instruction::Unary { rd, r1, op } => {
                 let r1val = regs[r1];
@@ -415,7 +427,7 @@ impl<'a> Executor<'a> {
                     UnaryOp::Not => !r1val,
                     UnaryOp::Neg => -r1val,
                 };
-                next_with(rd, val)
+                next_with(*rd, val)
             }
             Instruction::call { label } => Update {
                 nextpc: self.program.label(label).unwrap().1,
@@ -427,15 +439,15 @@ impl<'a> Executor<'a> {
             Instruction::jal { rd, label } => Update {
                 nextpc: self.program.label(label).unwrap().1,
                 diff: Some(Diff::Register {
-                    reg: rd,
+                    reg: *rd,
                     val: self.pc + 4,
                 }),
             },
 
             Instruction::jalr { rd, offset, r1 } => Update {
-                nextpc: self.add(regs[r1], offset).with_context(|| "")? & !1,
+                nextpc: self.add(regs[r1], *offset).with_context(|| "")? & !1,
                 diff: Some(Diff::Register {
-                    reg: rd,
+                    reg: *rd,
                     val: self.pc + 4,
                 }),
             },

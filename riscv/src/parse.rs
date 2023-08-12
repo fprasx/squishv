@@ -1,7 +1,8 @@
 use anyhow::{anyhow, bail, Context};
 use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap};
+use std::collections::HashMap;
+use std::str::FromStr;
 use thiserror::Error;
 
 use crate::lex::Token;
@@ -27,7 +28,7 @@ pub enum RegisterParseError {
     ParseError(String),
 }
 
-impl TryFrom<Token<'_>> for Register {
+impl TryFrom<Token> for Register {
     type Error = RegisterParseError;
 
     fn try_from(token: Token) -> Result<Self, Self::Error> {
@@ -239,29 +240,29 @@ declare_instruction_set!(
 
 #[rustfmt::skip]
 #[allow(non_camel_case_types)]
-#[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone, Copy)]
-pub enum Instruction<'a> {
+#[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
+pub enum Instruction {
     RegImm { rd: Register, r1: Register, imm: i32, op: RegImmOp },
     RegReg { rd: Register, r1: Register, r2: Register, op: RegRegOp },
     Load {rd: Register, offset: i32, r1: Register, op: LoadOp },
     Store {r2: Register, offset: i32, r1: Register, op: StoreOp },
-    Branch  { r1: Register, r2: Register, label: &'a str, op: BranchOp },
+    Branch  { r1: Register, r2: Register, label: String, op: BranchOp },
     LoadImm { rd: Register, imm: i32, op: LoadImmOp },
-    BranchZero { r1: Register, label: &'a str, op: BranchZeroOp },
+    BranchZero { r1: Register, label: String, op: BranchZeroOp },
     Unary { rd: Register, r1: Register, op: UnaryOp },
 
     // Calling and jumping
-    call        { label: &'a str },
+    call        { label: String },
     // Note: if a register is not provided, assume rd
-    jal         { rd: Register, label: &'a str },
+    jal         { rd: Register, label: String },
     // Note: if a register is not provided, assume 0(rd)
     jalr        { rd: Register, offset: i32, r1: Register },
-    j           { label: &'a str },
+    j           { label: String },
     jr          { rs: Register },
     ret         {},
 }
 
-impl<'a> fmt::Display for Instruction<'a> {
+impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Instruction::RegImm { rd, r1, imm, op } => write!(f, "{op} {rd}, {r1}, {imm}"),
@@ -284,22 +285,18 @@ impl<'a> fmt::Display for Instruction<'a> {
 
 /// An item of RISC-V assembly, either an instruction or label (for now)
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
-pub enum Item<'a> {
-    #[serde(borrow)]
-    Instruction(Instruction<'a>),
+pub enum Item {
+    Instruction(Instruction),
 
     // Include span info so that we can emit better error messages during the
     // post-processing stage of parsing, where we check that all labels accessed
     // actually exist and that no labels are defined more than once.
-    Label {
-        name: &'a str,
-        span: Span,
-    },
+    Label { name: String, span: Span },
 }
 
-impl<'a> Item<'a> {
+impl Item {
     /// Access the inner instruction. Panic if not called on an instruction.
-    pub fn get_instruction(&self) -> &Instruction<'a> {
+    pub fn get_instruction(&self) -> &Instruction {
         match self {
             Item::Instruction(i) => i,
             Item::Label { .. } => unreachable!("unwrap_instruction called on label"),
@@ -307,7 +304,7 @@ impl<'a> Item<'a> {
     }
 
     /// Access the inner label. Panic if not called on an label.
-    pub fn get_label(self) -> &'a str {
+    pub fn get_label(self) -> String {
         match self {
             Item::Instruction(_) => unreachable!("unwrap_label called on instruction"),
             Item::Label { name, .. } => name,
@@ -315,10 +312,10 @@ impl<'a> Item<'a> {
     }
 }
 
-type ParseResult<'a> = anyhow::Result<Item<'a>>;
+type ParseResult = anyhow::Result<Item>;
 
 impl<'a> Lexer<'a> {
-    pub fn parse_item(&mut self) -> Option<ParseResult<'a>> {
+    pub fn parse_item(&mut self) -> Option<ParseResult> {
         // Skip comments
         while matches!(
             self.peek(),
@@ -339,7 +336,7 @@ impl<'a> Lexer<'a> {
     // Assumes that there are tokens left in the stream and that the first comment
     // is not a token. The reason this method exists is so that we can use the
     // question mark with results, instead of options.
-    fn _parse_item(&mut self) -> ParseResult<'a> {
+    fn _parse_item(&mut self) -> ParseResult {
         // Parsing a label
         let ident = self.ident()?;
         let (ident, span) = ident.unwrap_ident();
@@ -424,7 +421,7 @@ impl<'a> Lexer<'a> {
             // j           { label: &'a str },
             // jr          { rs: Register },
             // ret         {},
-            match ident {
+            match ident.as_str() {
                 "call" => {
                     let label = self.ident()?.unwrap_ident().0;
                     Instruction::call { label }
@@ -487,16 +484,25 @@ impl<'a> Lexer<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Program<'a> {
+pub struct Program {
     // The values of this map are indices into `asm`. They point to the instruction
     // in `asm` corresponding to the label with the keyed name.
-    labels: HashMap<&'a str, usize>,
-    asm: Vec<Instruction<'a>>,
+    labels: HashMap<String, usize>,
+    pub asm: Vec<Instruction>,
 }
 
-impl<'a> Program<'a> {
+impl FromStr for Program {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Program> {
+        let mut lexer = Lexer::new(s);
+        Program::parse(&mut lexer)
+    }
+}
+
+impl Program {
     // Get the raw items out of the lexer
-    fn parse_items(lexer: &mut Lexer<'a>) -> anyhow::Result<Vec<Item<'a>>> {
+    fn parse_items(lexer: &mut Lexer) -> anyhow::Result<Vec<Item>> {
         let mut items = vec![];
         while let Some(item) = lexer.parse_item() {
             // Context should be handled by caller
@@ -505,19 +511,19 @@ impl<'a> Program<'a> {
         Ok(items)
     }
 
-    pub fn parse(source: &mut Lexer<'a>) -> anyhow::Result<Program<'a>> {
+    pub fn parse(source: &mut Lexer) -> anyhow::Result<Program> {
         // We use this to check if any labels are defined multiple times
-        let mut labels2pcs: HashMap<&str, usize> = HashMap::new();
-        let mut labels2spans: HashMap<&'a str, Vec<Span>> = HashMap::new();
+        let mut labels2pcs: HashMap<String, usize> = HashMap::new();
+        let mut labels2spans: HashMap<String, Vec<Span>> = HashMap::new();
         let items = Program::parse_items(source).context("failed to parse item")?;
         for (i, item) in items.iter().enumerate() {
             if let Item::Label { name, span } = &item {
-                labels2pcs.insert(name, i);
+                labels2pcs.insert(name.clone(), i);
 
                 // Record the spans where each label is defined; there should only be one
                 // for each label
                 labels2spans
-                    .entry(name)
+                    .entry(name.clone())
                     .and_modify(|spans| spans.push(span.clone()))
                     .or_insert(vec![span.clone()]);
             }
@@ -599,11 +605,11 @@ impl<'a> Program<'a> {
     }
 }
 
-impl<'a> TryFrom<&'a str> for Program<'a> {
+impl TryFrom<&str> for Program {
     type Error = anyhow::Error;
 
-    fn try_from(s: &'a str) -> anyhow::Result<Program<'a>> {
-        let mut lexer: Lexer<'a> = Lexer::new(s);
+    fn try_from(s: &str) -> anyhow::Result<Program> {
+        let mut lexer: Lexer = Lexer::new(s);
         Program::parse(&mut lexer)
     }
 }
@@ -718,12 +724,12 @@ mod tests {
                     },
                     Instruction::BranchZero {
                         r1: Register::a0,
-                        label: "label",
+                        label: "label".to_string(),
                         op: BranchZeroOp::Beqz
                     },
                 ],
                 labels: map![
-                    "label"=> 2,
+                    "label" => 2,
                 ]
             }
         );
@@ -829,12 +835,12 @@ mod tests {
             Branch {
                 r1: s7,
                 r2: a2,
-                label: "open",
+                label: "open".to_string(),
                 op: Beq,
             },
             jal {
                 rd: t1,
-                label: "skid",
+                label: "skid".to_string(),
             },
             RegReg {
                 rd: s9,
@@ -850,7 +856,7 @@ mod tests {
             },
             BranchZero {
                 r1: t4,
-                label: "tiro",
+                label: "tiro".to_string(),
                 op: Bgtz,
             },
             RegImm {
@@ -878,7 +884,9 @@ mod tests {
                 imm: -42,
                 op: Srai,
             },
-            call { label: "pry" },
+            call {
+                label: "pry".to_string(),
+            },
             jalr {
                 rd: s9,
                 offset: -0x18,
@@ -893,13 +901,13 @@ mod tests {
             Branch {
                 r1: a7,
                 r2: t6,
-                label: "null",
+                label: "null".to_string(),
                 op: Ble,
             },
             Branch {
                 r1: a3,
                 r2: t0,
-                label: "pp",
+                label: "pp".to_string(),
                 op: Bge,
             },
             RegImm {
@@ -933,7 +941,7 @@ mod tests {
             },
             BranchZero {
                 r1: t5,
-                label: "mum",
+                label: "mum".to_string(),
                 op: Bltz,
             },
             RegImm {
@@ -961,12 +969,12 @@ mod tests {
             },
             jal {
                 rd: ra,
-                label: "pg",
+                label: "pg".to_string(),
             },
             Branch {
                 r1: a3,
                 r2: s8,
-                label: "yam",
+                label: "yam".to_string(),
                 op: Bleu,
             },
             Store {
@@ -989,7 +997,7 @@ mod tests {
             Branch {
                 r1: s4,
                 r2: s1,
-                label: "pugs",
+                label: "pugs".to_string(),
                 op: Bgeu,
             },
             RegReg {
@@ -1001,7 +1009,7 @@ mod tests {
             Branch {
                 r1: s1,
                 r2: t3,
-                label: "lube",
+                label: "lube".to_string(),
                 op: Bgtu,
             },
             RegImm {
@@ -1025,13 +1033,13 @@ mod tests {
             Branch {
                 r1: t0,
                 r2: s7,
-                label: "pelt",
+                label: "pelt".to_string(),
                 op: Bltu,
             },
             Branch {
                 r1: sp,
                 r2: a7,
-                label: "keen",
+                label: "keen".to_string(),
                 op: Bgt,
             },
             RegReg {
@@ -1049,7 +1057,7 @@ mod tests {
             Branch {
                 r1: a6,
                 r2: t1,
-                label: "swum",
+                label: "swum".to_string(),
                 op: Blt,
             },
             Load {
@@ -1074,10 +1082,12 @@ mod tests {
                 offset: 0,
                 r1: s10,
             }, // TODO: check if the registers should be the other way
-            j { label: "corn" },
+            j {
+                label: "corn".to_string(),
+            },
             BranchZero {
                 r1: s1,
-                label: "meld",
+                label: "meld".to_string(),
                 op: Bgez,
             },
             RegImm {
@@ -1089,7 +1099,7 @@ mod tests {
             Branch {
                 r1: a3,
                 r2: s10,
-                label: "sing",
+                label: "sing".to_string(),
                 op: Bne,
             },
             jr { rs: s3 },
@@ -1106,17 +1116,17 @@ mod tests {
             },
             BranchZero {
                 r1: a3,
-                label: "raw",
+                label: "raw".to_string(),
                 op: Bnez,
             },
             BranchZero {
                 r1: s7,
-                label: "hew",
+                label: "hew".to_string(),
                 op: Blez,
             },
             BranchZero {
                 r1: x0,
-                label: "tors",
+                label: "tors".to_string(),
                 op: Beqz,
             },
         ];

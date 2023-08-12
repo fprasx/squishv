@@ -2,20 +2,20 @@ use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use std::{fmt, mem, ops::Range};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenInner<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenInner {
     RightParen,
     LeftParen,
     Comma,
     Colon,
     Minus,
     Constant(i32),
-    Ident(&'a str),
-    SlashComment(&'a str),
-    HashComment(&'a str),
+    Ident(String),
+    SlashComment(String),
+    HashComment(String),
 }
 
-impl fmt::Display for TokenInner<'_> {
+impl fmt::Display for TokenInner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TokenInner::RightParen => write!(f, "("),
@@ -51,15 +51,15 @@ impl fmt::Display for Span {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Token<'a> {
-    pub inner: TokenInner<'a>,
+pub struct Token {
+    pub inner: TokenInner,
     span: Span,
 }
 
-impl fmt::Display for Token<'_> {
+impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let span = &self.span;
-        match self.inner {
+        match &self.inner {
             TokenInner::RightParen => {
                 write!(f, ") {span}",)
             }
@@ -103,8 +103,8 @@ macro_rules! parse_token {
             }
         }
         $(
-            impl<'a> Lexer<'a> {
-                pub fn $tokenfn(&mut self) -> ::anyhow::Result<Token<'a>> {
+            impl Lexer<'_> {
+                pub fn $tokenfn(&mut self) -> ::anyhow::Result<Token> {
                     use ::anyhow::Context;
                     use $crate::lex::TokenInner::*;
                     match self.peek() {
@@ -138,8 +138,8 @@ parse_token! {
     SlashComment(_) => slash_comment
 }
 
-impl<'a> Token<'a> {
-    pub fn new(inner: TokenInner<'a>, line: usize, columns: Range<usize>) -> Self {
+impl Token {
+    pub fn new(inner: TokenInner, line: usize, columns: Range<usize>) -> Self {
         Token {
             inner,
             span: Span::new(line, columns),
@@ -147,7 +147,7 @@ impl<'a> Token<'a> {
     }
 
     /// Extract the inner token
-    pub fn inner(&self) -> TokenInner<'a> {
+    pub fn inner(self) -> TokenInner {
         self.inner
     }
 
@@ -157,12 +157,12 @@ impl<'a> Token<'a> {
     }
 
     /// Split the token into the inner token and span
-    pub fn split(self) -> (TokenInner<'a>, Span) {
+    pub fn split(self) -> (TokenInner, Span) {
         (self.inner, self.span)
     }
 
     /// Extract the string from an ident
-    pub fn unwrap_ident(self) -> (&'a str, Span) {
+    pub fn unwrap_ident(self) -> (String, Span) {
         match self.inner {
             TokenInner::Ident(inner) => (inner, self.span),
             other => panic!("called unwrap ident on a {other}"),
@@ -178,7 +178,7 @@ impl<'a> Token<'a> {
     }
 }
 
-type LexResult<'a> = anyhow::Result<Token<'a>>;
+type LexResult = anyhow::Result<Token>;
 
 /// Low level lexer that can be turned into a peekable iterator over tokens.
 /// There are a couple reasons this lexer should not be used directly:
@@ -240,7 +240,7 @@ impl<'a> RawLexer<'a> {
     }
 
     // Parse another token
-    fn next_from_buf(&mut self) -> Option<anyhow::Result<Token<'a>>> {
+    fn next_from_buf(&mut self) -> Option<anyhow::Result<Token>> {
         self.gobble_whitespace();
         if self.buf.is_empty() {
             return None;
@@ -266,7 +266,7 @@ impl<'a> RawLexer<'a> {
         } else if let Some(rest) = self.buf.strip_prefix('#') {
             let text = rest.consume(|c| c != '\n').unwrap_or("");
             Ok(Token::new(
-                TokenInner::HashComment(text),
+                TokenInner::HashComment(text.to_string()),
                 line,
                 // Add 1 for the '#'
                 self.advance(text.len() + 1),
@@ -274,7 +274,7 @@ impl<'a> RawLexer<'a> {
         } else if let Some(rest) = self.buf.strip_prefix("//") {
             let text = rest.consume(|c| c != '\n').unwrap_or("");
             Ok(Token::new(
-                TokenInner::SlashComment(text),
+                TokenInner::SlashComment(text.to_string()),
                 line,
                 // Add 2 for the "//"
                 self.advance(text.len() + 2),
@@ -322,7 +322,7 @@ impl<'a> RawLexer<'a> {
             // Note: parse labels last as they can contain numbers, but we don't want
             // to parse 123 as a label
             Ok(Token::new(
-                TokenInner::Ident(label),
+                TokenInner::Ident(label.to_string()),
                 line,
                 self.advance(label.len()),
             ))
@@ -341,7 +341,7 @@ impl<'a> RawLexer<'a> {
 pub struct Lexer<'a> {
     inner: RawLexer<'a>,
     errored: bool,
-    peek: Option<LexResult<'a>>,
+    peek: Option<LexResult>,
 }
 
 impl<'a> Lexer<'a> {
@@ -355,7 +355,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn peek(&mut self) -> Option<&LexResult<'a>> {
+    pub fn peek(&mut self) -> Option<&LexResult> {
         self.peek.as_ref()
     }
 
@@ -364,8 +364,8 @@ impl<'a> Lexer<'a> {
     }
 }
 
-impl<'a> Iterator for Lexer<'a> {
-    type Item = anyhow::Result<Token<'a>>;
+impl Iterator for Lexer<'_> {
+    type Item = anyhow::Result<Token>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if matches!(&self.peek, Some(Err(_))) {
@@ -382,7 +382,7 @@ impl<'a> Iterator for Lexer<'a> {
 }
 
 impl<'a> IntoIterator for RawLexer<'a> {
-    type Item = anyhow::Result<Token<'a>>;
+    type Item = anyhow::Result<Token>;
 
     type IntoIter = Lexer<'a>;
 
@@ -477,12 +477,20 @@ mod tests {
                 Token::new(TokenInner::Colon, 1, 5..6),
                 Token::new(TokenInner::LeftParen, 1, 7..8),
                 Token::new(TokenInner::RightParen, 1, 9..10),
-                Token::new(TokenInner::Ident("addi"), 2, 1..5),
-                Token::new(TokenInner::HashComment(" and slli :)"), 2, 6..19),
-                Token::new(TokenInner::SlashComment(" slashy slash"), 3, 1..16),
-                Token::new(TokenInner::Ident("checka"), 4, 1..7),
+                Token::new(TokenInner::Ident("addi".to_string()), 2, 1..5),
+                Token::new(
+                    TokenInner::HashComment(" and slli :)".to_string()),
+                    2,
+                    6..19
+                ),
+                Token::new(
+                    TokenInner::SlashComment(" slashy slash".to_string()),
+                    3,
+                    1..16
+                ),
+                Token::new(TokenInner::Ident("checka".to_string()), 4, 1..7),
                 Token::new(TokenInner::Colon, 4, 7..8),
-                Token::new(TokenInner::Ident("loopa"), 5, 1..6),
+                Token::new(TokenInner::Ident("loopa".to_string()), 5, 1..6),
                 Token::new(TokenInner::Colon, 5, 6..7),
                 Token::new(TokenInner::Constant(69), 6, 1..3),
                 Token::new(TokenInner::Minus, 6, 4..5),

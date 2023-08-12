@@ -4,7 +4,7 @@ use anyhow::{bail, ensure, Context};
 
 use crate::parse::{LoadOp, StoreOp};
 
-#[derive(Debug, PartialEq, Eq, Default)]
+#[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
 pub struct Config {
     /// The default value for unitialized memory locations. `None` means there is
     /// not default value and it is an error to access an unitialized location.
@@ -24,7 +24,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 /// Byte addressible memory that handles unitialized values and unaligned access.
 ///
 /// See [`Config`] for more details.
