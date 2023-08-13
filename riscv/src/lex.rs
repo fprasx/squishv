@@ -105,7 +105,6 @@ macro_rules! parse_token {
         $(
             impl Lexer<'_> {
                 pub fn $tokenfn(&mut self) -> ::anyhow::Result<Token> {
-                    use ::anyhow::Context;
                     use $crate::lex::TokenInner::*;
                     match self.peek() {
                         // Unwrap is safe as we already peeked, we just use next
@@ -114,7 +113,23 @@ macro_rules! parse_token {
                         Some(Ok(Token { inner, span })) => ::anyhow::bail!(
                             "Expected {}, found {inner} at {span}", stringify!($tokenfn),
                         ),
-                        Some(Err(_)) => self.next().unwrap().context(concat!("cannot parse ", stringify!($tokenfn))),
+                        Some(Err(e)) => {
+                            // Note: _don't_ consume the error (via .next()), because it may
+                            // be ok that the token isn't there. For example suppose we have
+                            // the following situation parsing a number:
+                            // -0x
+                            // We might do something like:
+                            // ```
+                            // let neg = tokens.minus().is_ok();
+                            // let num = tokens.constant()?.unwrap_constant().0;
+                            // // do stuff with num and neg
+                            // ```
+                            // If calling .minus() on neg consumes the error, then
+                            // the call with .constant() will just return "ran out of
+                            // input" instead of the actual error, instead of the actual
+                            // error, which is reported on the .minus() call.
+                            bail!("Expected {}, but {e}", stringify!($tokenfn))
+                        }
                         None => ::anyhow::bail!(
                             "Expected {}, but ran out of input", stringify!($tokenfn)
                         ),
@@ -455,6 +470,29 @@ mod tests {
         let mut lexer = Lexer::new("&%^*");
         assert!(matches!(lexer.next(), Some(Err(_))));
         assert!(lexer.next().is_none())
+    }
+
+    /// This test asserts that peeking for a token with something like `.minus()`
+    /// doesn't actually consume the internal error if it fails. So failing calls
+    /// to `.minus()` are idempotent. Note that calling `next()` multiple times
+    /// on the iterator will only return the error once. However, `.peek()` and its
+    /// `.minus()` ilk actually have two semantic errors to return: incorrect token,
+    /// or error lexing a token. For now, we just go with the first, and allow
+    /// a call to `.minus()` to fail several times, intead of mimicking `.next()`'s
+    /// behaviour, which only fails once.
+    #[test]
+    fn idempotent_peek() {
+        let mut lexer = Lexer::new("0x");
+        // this will attempt to parse a token, which will cause an error,
+        // however, it does not consume the error
+        assert!(lexer.minus().is_err());
+        // error not consumed
+        assert!(lexer.peek().is_some());
+        // do it a couple more times for good measure
+        for _ in 0..10 {
+            assert!(lexer.minus().is_err());
+            assert!(lexer.peek().is_some());
+        }
     }
 
     #[test]
