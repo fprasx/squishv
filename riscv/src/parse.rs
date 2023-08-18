@@ -24,7 +24,7 @@ pub enum RegisterParseError {
     // requires it's error's be 'static but the token would only live for 'a
     #[error("can only parse register out of ident, but got '{0}'")]
     InvalidToken(String),
-    #[error("'{0}' is not a valid register")]
+    #[error("failed to parse register: {0}")]
     ParseError(String),
 }
 
@@ -649,10 +649,10 @@ mod tests {
             Program {
                 asm: vec![],
                 labels: map![
-                    "checka" => 0,
-                    "loopa"=> 1,
-                    "checkb"=> 2,
-                    "loopb"=> 3,
+                    "checka".to_string() => 0,
+                    "loopa".to_string() => 1,
+                    "checkb".to_string() => 2,
+                    "loopb".to_string() => 3,
                 ]
             }
         );
@@ -729,7 +729,7 @@ mod tests {
                     },
                 ],
                 labels: map![
-                    "label" => 2,
+                    "label".to_string() => 2,
                 ]
             }
         );

@@ -202,6 +202,7 @@ type LexResult = anyhow::Result<Token>;
 /// The `Lexer` type wraps a `RawLexer` and takes cares of these things.
 /// However, it is still nice to have actual lexing functionality abstracted
 /// away in one place.
+#[derive(Debug)]
 struct RawLexer<'a> {
     buf: &'a str,
     line: usize,
@@ -218,7 +219,7 @@ impl<'a> RawLexer<'a> {
     }
 
     fn finished(&self) -> bool {
-        self.buf.is_empty()
+        self.buf.trim().is_empty()
     }
 
     /// Gobble whitespace and update internal line/char positions
@@ -353,6 +354,7 @@ impl<'a> RawLexer<'a> {
 
 /// A peekable iterator over tokens. If an error is returned, the `Lexer` will
 /// stop iteration afterwards.
+#[derive(Debug)]
 pub struct Lexer<'a> {
     inner: RawLexer<'a>,
     errored: bool,

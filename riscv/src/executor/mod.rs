@@ -6,7 +6,8 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use anyhow::{anyhow, Context, Ok};
+use anyhow::{anyhow, Context};
+use thiserror::Error;
 
 use crate::parse::{
     BranchOp, BranchZeroOp, Instruction, LoadImmOp, Program, RegImmOp, RegRegOp, Register, StoreOp,
@@ -142,10 +143,10 @@ pub struct Executor {
 }
 
 /// An update that should be applied to the Executor after executing an instruction
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Update {
-    nextpc: i32,
-    diff: Option<Diff>,
+    pub nextpc: i32,
+    pub diff: Option<Diff>,
 }
 
 impl Update {
@@ -156,10 +157,29 @@ impl Update {
 }
 
 /// A diff to apply to the registers or pc
-#[derive(Debug)]
-enum Diff {
+#[derive(Debug, Clone, Copy)]
+pub enum Diff {
     Memory { addr: i32, val: i32, op: StoreOp },
     Register { reg: Register, val: i32 },
+}
+
+pub type ExecResult<T> = Result<T, ExecError>;
+
+#[derive(Error, Debug)]
+pub enum ExecError {
+    #[error("attempt to write {value} to x0 (hardwired zero)")]
+    WriteToX0 { value: i32 },
+
+    /// An error due to the memory system
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+
+    /// Returned when we've hit a breakpoint. It is safe to continue after this.
+    #[error("breakpoint hit")]
+    BreakPoint,
+
+    #[error("execution finished")]
+    Finished,
 }
 
 impl Executor {
@@ -177,6 +197,15 @@ impl Executor {
         }
     }
 
+    pub fn set(&mut self, reg: Register, val: i32) -> ExecResult<()> {
+        if reg == Register::x0 {
+            Err(ExecError::WriteToX0 { value: val })
+        } else {
+            self.regfile[reg] = val;
+            Ok(())
+        }
+    }
+
     /// Adds two numbers while respecting the configuration for overflow behaviour.
     fn add(&self, fst: i32, snd: i32) -> anyhow::Result<i32> {
         match self.config.overflow_mode {
@@ -184,7 +213,7 @@ impl Executor {
             OverflowBehaviour::Saturate => Ok(fst.saturating_add(snd)),
             OverflowBehaviour::Trap => fst
                 .checked_add(snd)
-                .ok_or_else(|| anyhow!("overflow error",)),
+                .ok_or_else(|| anyhow!("overflow error")),
         }
     }
 
@@ -217,32 +246,42 @@ impl Executor {
         }
     }
 
-    pub fn apply(&mut self, update: Update) -> anyhow::Result<()> {
-        self.pc = update.nextpc;
-        match update.diff {
-            Some(Diff::Memory { addr, val, op }) => {
-                self.memory.store(addr, val, op)?;
-            }
-            Some(Diff::Register { reg, val }) => self.regfile[reg] = val,
-            None => (),
-        };
-        Ok(())
-    }
-
-    pub fn execute(&mut self, regs: &RegisterSnapshot) -> Option<anyhow::Result<Update>> {
-        if self.program.at(self.pc).is_none() {
-            None
+    pub fn execute(&mut self) -> ExecResult<Update> {
+        let update = if self.program.at(self.pc).is_none() {
+            Err(ExecError::Finished)?
         } else {
-            Some(self._execute(regs))
-        }
+            self._execute()?
+        };
+
+        if let Some(diff) = update.diff {
+            match diff {
+                Diff::Memory { addr, val, op } => {
+                    self.memory.store(addr, val, op)?;
+                }
+                Diff::Register { reg, val } => {
+                    if reg != Register::x0 {
+                        self.regfile[reg] = val;
+                    } else {
+                        Err(ExecError::WriteToX0 { value: val })?
+                    }
+                }
+            }
+        };
+
+        // only advance pc after applying the diff succeeds (we want to stay stuck
+        // if execution fails)
+        self.pc = update.nextpc;
+
+        Ok(update)
     }
 
     // Should only be called if the program is not done executing. This is
-    // so that we can use the ? in the Result monad. Self::execute is just a thin
+    // so that we can use the ? in the Result monad. Self::execute is mostly a
     // wrapper around this function that first checks if we are done executing,
-    // and as such returns an Option<Result<Update>> - making the ? only useful
-    // for options.
-    fn _execute(&mut self, regs: &RegisterSnapshot) -> anyhow::Result<Update> {
+    // and only calls _execute and applies the result if not. This, way we
+    // dont have to return Option<anyhow::Result<Update>>, which make make the ?
+    // apply to options.
+    fn _execute(&mut self) -> anyhow::Result<Update> {
         // See contract for calling funtion
         let asm = self
             .program
@@ -260,6 +299,7 @@ impl Executor {
         // TODO: move the state changes after execution in case there was an error
         self.executed += 1;
 
+        let regs = &self.regfile;
         let pc = self.pc;
 
         // Helper functions for producing the update
@@ -393,7 +433,7 @@ impl Executor {
                     BranchOp::Bleu => (regs[r1] as u32) <= (regs[r2] as u32),
                 };
                 if jump {
-                    Update::jump(self.program.label(&label).unwrap().1)
+                    Update::jump(self.program.label(label).unwrap().1)
                 } else {
                     next
                 }
@@ -408,7 +448,7 @@ impl Executor {
                     BranchZeroOp::Blez => regs[r1] <= 0,
                 };
                 if jump {
-                    Update::jump(self.program.label(&label).unwrap().1)
+                    Update::jump(self.program.label(label).unwrap().1)
                 } else {
                     next
                 }

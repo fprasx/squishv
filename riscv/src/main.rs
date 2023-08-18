@@ -1,7 +1,11 @@
-use riscv::parse::Program;
+use riscv::{
+    lex::Lexer,
+    parse::{Program, Register}, executor::REGISTERS,
+};
 
 fn main() -> anyhow::Result<()> {
-    let s = format!("{:?}", "f".parse::<Program>().unwrap_err());
-    println!("{s}");
+    for reg in REGISTERS {
+        println!("addi {reg}, {reg}, 4")
+    }
     Ok(())
 }
