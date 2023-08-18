@@ -246,12 +246,16 @@ impl Executor {
         }
     }
 
-    pub fn execute(&mut self) -> ExecResult<Update> {
-        let update = if self.program.at(self.pc).is_none() {
-            Err(ExecError::Finished)?
-        } else {
-            self._execute()?
-        };
+    /// Takes an [`Update`] and applies it to the [`Executor`]
+    fn commit(&mut self, update: &Update) -> ExecResult<()> {
+        // If necessary, take a snapshot _before_ updating
+        if self.executed % SNAPSHOT_INTERVAL == 0 {
+            if let Some(prev) = self.snapshots.insert(self.executed, self.regfile.clone()) {
+                // Sanity check that that we're still computing the same result
+                // this time around
+                assert_eq!(prev, self.regfile);
+            }
+        }
 
         if let Some(diff) = update.diff {
             match diff {
@@ -268,36 +272,27 @@ impl Executor {
             }
         };
 
-        // only advance pc after applying the diff succeeds (we want to stay stuck
-        // if execution fails)
+        // Only advance these after applying the diff succeeds (we want to stay
+        // stuck if execution fails)
         self.pc = update.nextpc;
+        self.executed += 1;
 
+        Ok(())
+    }
+
+    pub fn execute(&mut self) -> ExecResult<Update> {
+        let update = self.next_state().context("failed to execute instruction")?;
+        self.commit(&update)?;
         Ok(update)
     }
 
-    // Should only be called if the program is not done executing. This is
-    // so that we can use the ? in the Result monad. Self::execute is mostly a
-    // wrapper around this function that first checks if we are done executing,
-    // and only calls _execute and applies the result if not. This, way we
-    // dont have to return Option<anyhow::Result<Update>>, which make make the ?
-    // apply to options.
-    fn _execute(&mut self) -> anyhow::Result<Update> {
+    /// Stateless function that returns the [`Update`] to produce the next
+    /// [`Executor`] state.
+    fn next_state(&self) -> ExecResult<Update> {
         // See contract for calling funtion
-        let asm = self
-            .program
-            .at(self.pc)
-            .expect("program is not done executing");
-
-        // If necessary, take a snapshot _before_ proceeding
-        if self.executed % SNAPSHOT_INTERVAL == 0 {
-            if let Some(prev) = self.snapshots.insert(self.executed, self.regfile.clone()) {
-                // Sanity check that that we're still computing the same result
-                // this time around
-                assert_eq!(prev, self.regfile);
-            }
-        }
-        // TODO: move the state changes after execution in case there was an error
-        self.executed += 1;
+        let Some(asm) = self.program.at(self.pc) else {
+            return Err(ExecError::Finished);
+        };
 
         let regs = &self.regfile;
         let pc = self.pc;
@@ -321,10 +316,7 @@ impl Executor {
             diff: None,
         };
 
-        // Some notes:
-        // * we mask shift amounts
         let update = match asm {
-            // TODO: make sure to test arithmetic/logical shifting
             Instruction::RegImm { rd, r1, imm, op } => {
                 let imm = *imm;
                 let r1val = regs[r1];
@@ -492,7 +484,7 @@ impl Executor {
                 }),
             },
             Instruction::j { label } => Update::jump(self.program.label(label).unwrap().1),
-            Instruction::jr { rs } => Update::jump((regs[rs] & !1) * 2),
+            Instruction::jr { rs } => Update::jump(regs[rs]),
             Instruction::ret {} => Update::jump(regs[Register::ra]),
         };
         Ok(update)
