@@ -9,9 +9,12 @@ use std::{
 use anyhow::{anyhow, Context};
 use thiserror::Error;
 
-use crate::parse::{
-    BranchOp, BranchZeroOp, Instruction, LoadImmOp, Program, RegImmOp, RegRegOp, Register, StoreOp,
-    UnaryOp,
+use crate::{
+    map,
+    parse::{
+        BranchOp, BranchZeroOp, Instruction, LoadImmOp, Program, RegImmOp, RegRegOp, Register,
+        StoreOp, UnaryOp,
+    },
 };
 
 /// Take a snapshot of the registers every `SNAPSHOT_INTERVAL` instructions.
@@ -180,6 +183,9 @@ pub enum ExecError {
 
     #[error("execution finished")]
     Finished,
+
+    #[error("reverted back to start state")]
+    StartReached,
 }
 
 impl Executor {
@@ -192,7 +198,10 @@ impl Executor {
             executed: 0,
             program,
             regfile: Default::default(),
-            snapshots: Default::default(),
+            // Start with one snapshot so that we have a state to reset to before
+            // we have even executed and instruction. We have to do this because
+            // we take snapshots in self.commit
+            snapshots: map!(0 => Default::default()),
             memory: Default::default(),
         }
     }
@@ -281,7 +290,9 @@ impl Executor {
     }
 
     pub fn execute(&mut self) -> ExecResult<Update> {
-        let update = self.next_state().context("failed to execute instruction")?;
+        let update = self
+            .next_state()
+            .context("failed to execute next instruction")?;
         self.commit(&update)?;
         Ok(update)
     }
@@ -490,7 +501,47 @@ impl Executor {
         Ok(update)
     }
 
-    fn revert(&mut self) -> Option<Update> {
-        todo!()
+    /// Function that reverts one instruction, returning the [`Update`] that
+    /// does the necessary changes.
+    pub fn revert(&mut self) -> ExecResult<Update> {
+        if self.executed == 0 {
+            return Err(ExecError::StartReached);
+        }
+
+        let executed = self.executed;
+        let offset_from_snapshot = executed.rem_euclid(SNAPSHOT_INTERVAL);
+        let base = executed - offset_from_snapshot;
+
+        // Every `SNAPSHOT_INTERVAL` we take store a snapshot so it should exist.
+        let regs = self.snapshots.get(&base).unwrap_or_else(|| {
+            panic!("no register snapshot for {base} even though we reached {executed}")
+        });
+
+        // Reset the executor to the base state
+        self.regfile = regs.clone();
+        self.pc = self.regfile.pc;
+        self.executed = base;
+
+        // Execute to the state we want to revert to. We know executed cannot be
+        // 0 because we check first thing
+        while self.executed < executed - 1 {
+            self.execute().unwrap();
+        }
+
+        // Generate the next update so we can reverse it to figure out the diff
+        // that reverts from the start state
+        let forward = self.next_state().unwrap();
+        let diff = forward.diff.map(|diff| match diff {
+            Diff::Memory { addr, val, op } => todo!(),
+            Diff::Register { reg, .. } => Diff::Register {
+                reg,
+                val: self.regfile[reg],
+            },
+        });
+
+        Ok(Update {
+            nextpc: self.pc,
+            diff,
+        })
     }
 }
