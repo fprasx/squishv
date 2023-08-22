@@ -1,0 +1,24 @@
+# Source:
+# https://dioxuslabs.com/learn/0.4/cookbook/tailwind
+
+[application]
+name = "squishv"
+default_platform = "web"
+out_dir = "dist"
+asset_dir = "public"
+
+[web.app]
+title = "squishv"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "public"]
+
+[web.resource]
+style = ["tailwind.css"]
+script = []
+
+[web.resource.dev]
+style = []
+script = []
+
