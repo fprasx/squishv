@@ -436,7 +436,7 @@ impl Executor {
                     BranchOp::Bleu => (regs[r1] as u32) <= (regs[r2] as u32),
                 };
                 if jump {
-                    Update::jump(self.program.label(label).unwrap().1)
+                    Update::jump(self.program.label(label).unwrap())
                 } else {
                     next
                 }
@@ -451,7 +451,7 @@ impl Executor {
                     BranchZeroOp::Blez => regs[r1] <= 0,
                 };
                 if jump {
-                    Update::jump(self.program.label(label).unwrap().1)
+                    Update::jump(self.program.label(label).unwrap())
                 } else {
                     next
                 }
@@ -473,14 +473,14 @@ impl Executor {
                 next_with(*rd, val)
             }
             Instruction::call { label } => Update {
-                nextpc: self.program.label(label).unwrap().1,
+                nextpc: self.program.label(label).unwrap(),
                 diff: Some(Diff::Register {
                     reg: Register::ra,
                     val: self.pc + 4,
                 }),
             },
             Instruction::jal { rd, label } => Update {
-                nextpc: self.program.label(label).unwrap().1,
+                nextpc: self.program.label(label).unwrap(),
                 diff: Some(Diff::Register {
                     reg: *rd,
                     val: self.pc + 4,

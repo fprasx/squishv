@@ -485,8 +485,9 @@ impl<'a> Lexer<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
-    // The values of this map are indices into `asm`. They point to the instruction
-    // in `asm` corresponding to the label with the keyed name.
+    // The values of this map are program counters the labels point to. The value
+    // of a label divided by 4 points to the instruction in `asm` corresponding
+    // to the label with the keyed name.
     labels: HashMap<String, usize>,
     pub asm: Vec<Instruction>,
 }
@@ -516,17 +517,23 @@ impl Program {
         let mut labels2pcs: HashMap<String, usize> = HashMap::new();
         let mut labels2spans: HashMap<String, Vec<Span>> = HashMap::new();
         let items = Program::parse_items(source).context("failed to parse item")?;
-        for (i, item) in items.iter().enumerate() {
-            if let Item::Label { name, span } = &item {
-                labels2pcs.insert(name.clone(), i);
 
-                // Record the spans where each label is defined; there should only be one
-                // for each label
-                labels2spans
-                    .entry(name.clone())
-                    .and_modify(|spans| spans.push(span.clone()))
-                    .or_insert(vec![span.clone()]);
-            }
+        // Extract all label information
+        let mut pc = 0;
+        for item in items.iter() {
+            let Item::Label { name, span } = &item else {
+                pc += 4;
+                continue;
+            };
+
+            labels2pcs.insert(name.clone(), pc);
+
+            // Record the spans where each label is defined; there should only be one
+            // for each label
+            labels2spans
+                .entry(name.clone())
+                .and_modify(|spans| spans.push(span.clone()))
+                .or_insert(vec![span.clone()]);
         }
 
         // We'll aggregate all errors onto this bad boy
@@ -548,10 +555,10 @@ impl Program {
         }
 
         // Make sure each label is actually defined somewhere
-        let mut count = 0;
+        let mut pc = 0;
         for instr in items.iter() {
             let Item::Instruction(instr) = instr else {
-                count += 1;
+                pc += 4;
                 continue;
             };
             let label = match instr {
@@ -566,7 +573,7 @@ impl Program {
                 errors.push(format!(
                     // pad with 10 zeroes because the 0x prefix takes up 2 chars
                     "undefined label <{label}> at pc {:#010x}: {}",
-                    count, instr
+                    pc, instr
                 ))
             }
         }
@@ -591,17 +598,12 @@ impl Program {
     }
 
     pub fn at(&self, pc: i32) -> Option<&Instruction> {
-        assert!(pc % 4 == 0);
+        assert!(pc % 4 == 0, "pc was {pc}");
         self.asm.get((pc / 4) as usize)
     }
 
-    pub fn label<'prog>(&'prog self, label: &str) -> Option<(&'prog Instruction, i32)> {
-        let index = self.labels.get(label);
-        // monad <3 functor
-        index
-            .and_then(|pc| self.asm.get(*pc))
-            // Unwrap is safe as we got through the `and_then`
-            .map(|asm| (asm, (index.unwrap() * 4) as i32))
+    pub fn label(&self, label: &str) -> Option<i32> {
+        self.labels.get(label).map(|pc| *pc as i32)
     }
 }
 
@@ -644,22 +646,38 @@ mod tests {
                 loopa:
                 checkb:
                 loopb:
+                li a0, 1
+                li a0, 2
+                after:
+                
             "})
             .unwrap(),
             Program {
-                asm: vec![],
+                asm: vec![
+                    Instruction::LoadImm {
+                        rd: Register::a0,
+                        imm: 1,
+                        op: LoadImmOp::Li
+                    },
+                    Instruction::LoadImm {
+                        rd: Register::a0,
+                        imm: 2,
+                        op: LoadImmOp::Li
+                    },
+                ],
                 labels: map![
                     "checka".to_string() => 0,
-                    "loopa".to_string() => 1,
-                    "checkb".to_string() => 2,
-                    "loopb".to_string() => 3,
+                    "loopa".to_string() => 0,
+                    "checkb".to_string() => 0,
+                    "loopb".to_string() => 0,
+                    "after".to_string() => 8,
                 ]
             }
         );
     }
 
     #[test]
-    fn repeate_label() {
+    fn repeated_label() {
         assert!(Program::try_from(indoc! {"
                 repeated:
                 repeated:
@@ -729,7 +747,7 @@ mod tests {
                     },
                 ],
                 labels: map![
-                    "label".to_string() => 2,
+                    "label".to_string() => 8,
                 ]
             }
         );
