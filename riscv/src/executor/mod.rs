@@ -400,11 +400,8 @@ impl Executor {
                     self.memory.store(addr, val, op)?;
                 }
                 Diff::Register { reg, val } => {
-                    if reg != Register::x0 {
-                        self.regfile[reg] = val;
-                    } else {
-                        Err(ExecError::WriteToX0 { val })?
-                    }
+                    // Checking for writes to x0 is handled in calculate_update
+                    self.regfile[reg] = val;
                 }
             }
         };
@@ -677,11 +674,18 @@ impl Executor {
                 }
             }
         };
+
+        // Make sure writing to x0 follows the config
         if let Some(Diff::Register { reg, val }) = processor_update.diff {
             if reg == Register::ra {
-                update.warnings.push(ExecError::WriteToX0 { val })
+                match self.config.write_to_x0 {
+                    ConfigLevel::Allow => (),
+                    ConfigLevel::Warn => update.warnings.push(ExecError::WriteToX0 { val }),
+                    ConfigLevel::Deny => Err(ExecError::WriteToX0 { val })?,
+                }
             }
         }
+
         update.processor_update = processor_update;
         Ok(update)
     }
