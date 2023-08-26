@@ -148,10 +148,34 @@ pub enum OverflowBehaviour {
     Trap,
 }
 
+/// Configuration levels for a setting indicating whether we should allow it, warn,
+/// or deny it.
 #[derive(Debug, Clone)]
-struct Config {
+pub enum ConfigLevel {
+    Allow,
+    Warn,
+    Deny,
+}
+
+impl ConfigLevel {
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, ConfigLevel::Allow)
+    }
+
+    pub fn is_warning(&self) -> bool {
+        matches!(self, ConfigLevel::Warn)
+    }
+
+    pub fn is_forbidden(&self) -> bool {
+        matches!(self, ConfigLevel::Deny)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
     /// What to do when overflow happens.
     overflow_mode: OverflowBehaviour,
+    write_to_x0: ConfigLevel,
 }
 
 #[derive(Debug, Clone)]
@@ -210,20 +234,24 @@ enum StackOp {
 
 /// An update that should be applied to the Executor after executing an instruction
 #[derive(Debug, Clone)]
-pub struct Update {
+pub struct ProcessorUpdate {
     pub nextpc: i32,
     pub diff: Option<Diff>,
-    stackop: Option<StackOp>,
 }
 
-impl Update {
+#[derive(Debug)]
+pub struct ExecUpdate {
+    processor_update: ProcessorUpdate,
+    stackop: Option<StackOp>,
+
+    /// These generallyg get
+    warnings: Vec<ExecError>,
+}
+
+impl ProcessorUpdate {
     /// Don't change a register, just jump to the given `pc`
     fn jump(nextpc: i32) -> Self {
-        Update {
-            nextpc,
-            diff: None,
-            stackop: None,
-        }
+        ProcessorUpdate { nextpc, diff: None }
     }
 }
 
@@ -238,8 +266,8 @@ pub type ExecResult<T> = Result<T, ExecError>;
 
 #[derive(Error, Debug)]
 pub enum ExecError {
-    #[error("attempt to write {value} to x0 (hardwired zero)")]
-    WriteToX0 { value: i32 },
+    #[error("attempt to write {val} to x0 (hardwired zero)")]
+    WriteToX0 { val: i32 },
 
     /// An error due to the memory system
     #[error(transparent)]
@@ -264,6 +292,7 @@ impl Executor {
         Self {
             config: Config {
                 overflow_mode: OverflowBehaviour::Trap,
+                write_to_x0: ConfigLevel::Warn,
             },
             pc: 0,
             executed: 0,
@@ -297,7 +326,7 @@ impl Executor {
 
     pub fn set(&mut self, reg: Register, val: i32) -> ExecResult<()> {
         if reg == Register::x0 {
-            Err(ExecError::WriteToX0 { value: val })
+            Err(ExecError::WriteToX0 { val })
         } else {
             self.regfile[reg] = val;
             Ok(())
@@ -348,7 +377,7 @@ impl Executor {
     ///
     /// If the commit fails (for example, due to a memory error), the executor's
     /// state will not be changed.
-    fn commit(&mut self, update: &Update) -> ExecResult<()> {
+    fn commit(&mut self, update: &ExecUpdate) -> ExecResult<()> {
         // If we are returning, all caller-saved registers should be the same
         if let Some(StackOp::PopStack) = update.stackop {
             let diff = self.regfile.check(&self.stack.last().unwrap().snapshot);
@@ -365,7 +394,7 @@ impl Executor {
         let snapshot = self.regfile.clone();
 
         // Apply the change
-        if let Some(diff) = update.diff {
+        if let Some(diff) = update.processor_update.diff {
             match diff {
                 Diff::Memory { addr, val, op } => {
                     self.memory.store(addr, val, op)?;
@@ -374,7 +403,7 @@ impl Executor {
                     if reg != Register::x0 {
                         self.regfile[reg] = val;
                     } else {
-                        Err(ExecError::WriteToX0 { value: val })?
+                        Err(ExecError::WriteToX0 { val })?
                     }
                 }
             }
@@ -398,54 +427,58 @@ impl Executor {
             })
         }
 
-        self.pc = update.nextpc;
+        self.pc = update.processor_update.nextpc;
         self.executed += 1;
 
         Ok(())
     }
 
-    pub fn execute(&mut self) -> ExecResult<Update> {
+    pub fn execute(&mut self) -> ExecResult<ExecUpdate> {
+        let Some(asm) = self.program.at(self.pc) else {
+            return Err(ExecError::Finished);
+        };
         let update = self
-            .next_state()
+            .calculate_update(asm)
             .context("failed to execute next instruction")?;
         self.commit(&update)?;
         Ok(update)
     }
 
-    /// Stateless function that returns the [`Update`] to produce the next
+    /// Stateless function that returns an [`ExecUpdate`] to produce the next
     /// [`Executor`] state.
-    fn next_state(&self) -> ExecResult<Update> {
-        // See contract for calling funtion
-        let Some(asm) = self.program.at(self.pc) else {
-            return Err(ExecError::Finished);
-        };
-
+    fn calculate_update(&self, asm: &Instruction) -> ExecResult<ExecUpdate> {
         let regs = &self.regfile;
         let pc = self.pc;
 
-        // Helper functions for producing the update
+        let mut update = ExecUpdate {
+            processor_update: ProcessorUpdate {
+                nextpc: -1,
+                diff: None,
+            },
+            stackop: None,
+            warnings: vec![],
+        };
+
+        // Helper functions for setting the correct update
         // Advance the pc by 4 and change the appropriate register
-        let next_with = |reg, val| Update {
+        let next_with = |reg, val| ProcessorUpdate {
             nextpc: pc + 4,
             diff: Some(Diff::Register { reg, val }),
-            stackop: None,
         };
 
         // Advance the pc by 4 and change the appropriate memory location
-        let next_mem = |addr, val, op| Update {
+        let next_mem = |addr, val, op| ProcessorUpdate {
             nextpc: pc + 4,
             diff: Some(Diff::Memory { addr, val, op }),
-            stackop: None,
         };
 
         // Just advance the pc
-        let next = Update {
+        let next = ProcessorUpdate {
             nextpc: pc + 4,
             diff: None,
-            stackop: None,
         };
 
-        let update = match asm {
+        let processor_update = match asm {
             Instruction::RegImm { rd, r1, imm, op } => {
                 let imm = *imm;
                 let r1val = regs[r1];
@@ -524,12 +557,11 @@ impl Executor {
                         regs[r1]
                     )
                 })?;
-                next_with(
-                    *rd,
-                    self.memory
-                        .load(addr, *op)
-                        .context("failed to perform load")?,
-                )
+                let val = self
+                    .memory
+                    .load(addr, *op)
+                    .context("failed to perform load")?;
+                next_with(*rd, val)
             }
             Instruction::Store { r2, offset, r1, op } => {
                 let addr = self.add(*offset, regs[r1]).with_context(|| {
@@ -554,7 +586,7 @@ impl Executor {
                     BranchOp::Bleu => (regs[r1] as u32) <= (regs[r2] as u32),
                 };
                 if jump {
-                    Update::jump(self.program.label(label).unwrap())
+                    ProcessorUpdate::jump(self.program.label(label).unwrap())
                 } else {
                     next
                 }
@@ -569,7 +601,7 @@ impl Executor {
                     BranchZeroOp::Blez => regs[r1] <= 0,
                 };
                 if jump {
-                    Update::jump(self.program.label(label).unwrap())
+                    ProcessorUpdate::jump(self.program.label(label).unwrap())
                 } else {
                     next
                 }
@@ -590,53 +622,73 @@ impl Executor {
                 };
                 next_with(*rd, val)
             }
-            Instruction::call { label } => Update {
-                nextpc: self.program.label(label).unwrap(),
-                diff: Some(Diff::Register {
-                    reg: Register::ra,
-                    val: self.pc + 4,
-                }),
-                stackop: Some(StackOp::PushStack),
-            },
-            Instruction::jal { rd, label } => Update {
-                nextpc: self.program.label(label).unwrap(),
-                diff: Some(Diff::Register {
-                    reg: *rd,
-                    val: self.pc + 4,
-                }),
-                stackop: Some(StackOp::PushStack),
-            },
-            Instruction::jalr { rd, offset, r1 } => Update {
-                nextpc: self.add(regs[r1], *offset).with_context(|| "")? & !1,
-                diff: Some(Diff::Register {
-                    reg: *rd,
-                    val: self.pc + 4,
-                }),
-                stackop: Some(StackOp::PushStack),
-            },
-            Instruction::j { label } => Update {
+            Instruction::call { label } => {
+                update.stackop = Some(StackOp::PushStack);
+                ProcessorUpdate {
+                    nextpc: self.program.label(label).unwrap(),
+                    diff: Some(Diff::Register {
+                        reg: Register::ra,
+                        val: self.pc + 4,
+                    }),
+                }
+            }
+            Instruction::jal { rd, label } => {
+                update.stackop = Some(StackOp::PushStack);
+                ProcessorUpdate {
+                    nextpc: self.program.label(label).unwrap(),
+                    diff: Some(Diff::Register {
+                        reg: *rd,
+                        val: self.pc + 4,
+                    }),
+                }
+            }
+            Instruction::jalr { rd, offset, r1 } => {
+                update.stackop = Some(StackOp::PushStack);
+                let nextpc = self.add(regs[r1], *offset).with_context(|| {
+                    format!(
+                        "failed to calculate address: {r1} = {}, offset = {offset}",
+                        regs[r1]
+                    )
+                })?;
+                ProcessorUpdate {
+                    nextpc,
+                    diff: Some(Diff::Register {
+                        reg: *rd,
+                        val: self.pc + 4,
+                    }),
+                }
+            }
+            Instruction::j { label } => ProcessorUpdate {
                 nextpc: self.program.label(label).unwrap(),
                 diff: None,
-                stackop: None,
             },
-            Instruction::jr { rs } => Update {
-                nextpc: regs[rs],
-                diff: None,
-                stackop: Some(StackOp::PopStack),
-            },
-
-            Instruction::ret {} => Update {
-                nextpc: regs[Register::ra],
-                diff: None,
-                stackop: Some(StackOp::PopStack),
-            },
+            Instruction::jr { rs } => {
+                update.stackop = Some(StackOp::PopStack);
+                ProcessorUpdate {
+                    nextpc: regs[rs],
+                    diff: None,
+                }
+            }
+            Instruction::ret {} => {
+                update.stackop = Some(StackOp::PopStack);
+                ProcessorUpdate {
+                    nextpc: regs[Register::ra],
+                    diff: None,
+                }
+            }
         };
+        if let Some(Diff::Register { reg, val }) = processor_update.diff {
+            if reg == Register::ra {
+                update.warnings.push(ExecError::WriteToX0 { val })
+            }
+        }
+        update.processor_update = processor_update;
         Ok(update)
     }
 
     /// Function that reverts one instruction, returning the [`Update`] that
     /// does the necessary changes.
-    pub fn revert(&mut self) -> ExecResult<Update> {
+    pub fn revert(&mut self) -> ExecResult<ExecUpdate> {
         // A key observation is that if we reached some state, at all points
         // leading up to that state, we had a valid execution. Therefore, if
         // we _correctly_ revert to a certain execution point, we can unwrap all
@@ -674,8 +726,9 @@ impl Executor {
 
         // Generate the next update so we can reverse it to figure out the diff
         // that reverts from the start state
-        let forward = self.next_state().unwrap();
-        let diff = forward.diff.map(|diff| match diff {
+        let asm = self.program.at(self.pc).unwrap();
+        let forward = self.calculate_update(&asm).unwrap();
+        let diff = forward.processor_update.diff.map(|diff| match diff {
             Diff::Memory { addr, val, op } => todo!(),
             Diff::Register { reg, .. } => Diff::Register {
                 reg,
@@ -688,10 +741,15 @@ impl Executor {
             StackOp::PopStack => StackOp::PushStack,
         });
 
-        Ok(Update {
-            nextpc: self.pc,
-            diff,
+        Ok(ExecUpdate {
+            processor_update: ProcessorUpdate {
+                nextpc: self.pc,
+                diff,
+            },
             stackop,
+            // TODO: might be worthwile to check if there are any warnings going
+            // into the state we are reverting to.
+            warnings: vec![],
         })
     }
 }
