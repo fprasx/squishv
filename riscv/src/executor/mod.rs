@@ -370,10 +370,10 @@ impl Executor {
                         format!("failed to add: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}")
                     })?,
                     RegRegOp::Sub => self.add(r1val, -r2val).with_context(|| {
-                        format!("failed to subtract: {r1} = {r1val}, {r2:#010x} = {r2val:#010x}")
+                        format!("failed to subtract: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}")
                     })?,
                     RegRegOp::Sll => self.shift_left(r1val, r2val as u32).with_context(|| {
-                        format!("failed to left shift: {r1} = {r1val}, {r2:#010x} = {r2val:#010x}")
+                        format!("failed to left shift: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}")
                     })?,
                     RegRegOp::Srl => {
                         self.shift_right_logical(r1val, r2val as u32)
