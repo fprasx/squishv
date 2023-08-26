@@ -4,6 +4,7 @@ pub mod memory;
 use std::{
     collections::HashMap,
     ops::{Index, IndexMut},
+    str::FromStr,
 };
 
 use anyhow::{anyhow, Context};
@@ -53,6 +54,34 @@ pub struct RegisterSnapshot {
 impl RegisterSnapshot {
     pub fn pc(&self) -> i32 {
         self.pc
+    }
+
+    /// Compare two [`RegisterSnapshot`] to see if their caller-saved registers
+    /// are equal.
+    ///
+    /// If not, returns [`Some`] with the registers that are different. Otherwise,
+    /// returns [`None`].
+    pub fn check(&self, other: &RegisterSnapshot) -> Option<Vec<Register>> {
+        use Register::*;
+        macro_rules! check {
+            ($($reg:expr),+ $(,)?) => {
+                {
+                    let mut different = vec![];
+                    $(
+                        if self[$reg] != other[$reg] {
+                            different.push($reg);
+                        }
+                    )+
+                    different
+                }
+            };
+        }
+        let different = check!(sp, s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11);
+        if different.is_empty() {
+            None
+        } else {
+            Some(different)
+        }
     }
 }
 
@@ -119,10 +148,21 @@ pub enum OverflowBehaviour {
     Trap,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Config {
     /// What to do when overflow happens.
     overflow_mode: OverflowBehaviour,
+}
+
+#[derive(Debug, Clone)]
+pub struct StackFrame {
+    snapshot: RegisterSnapshot,
+
+    /// [`StackFrame`]'s need to store the `executed` at which they were taken so
+    /// we can reset to a previous state properly. `executed` represents the
+    /// number of instructions executed _before_ the executing the instruction
+    /// that performs the call.
+    executed: usize,
 }
 
 // TODO: use Rc/Arc to make cloning cheaper?
@@ -140,9 +180,32 @@ pub struct Executor {
     pub regfile: RegisterSnapshot,
 
     /// Used to store snapshots of the programs state at a certain point in time
-    /// for ttd (time-travel debugging)
+    /// for ttd (time-travel debugging). The index is the number of instructions
+    /// executed _before_ taking the snapshot.
     snapshots: HashMap<usize, RegisterSnapshot>,
     memory: memory::Memory,
+
+    /// This is not quite a stack. Rather, each [`StackFrame`] stores the state
+    /// of the processor right _before_ the call was made. This way, when the
+    /// call finishes, we can compare the before and after states.
+    stack: Vec<StackFrame>,
+}
+
+impl FromStr for Executor {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(s.parse().context("failed to parse program")?))
+    }
+}
+
+#[derive(Debug, Clone)]
+enum StackOp {
+    /// Push a new stack frame.
+    PushStack,
+
+    /// Pop a stack frame.
+    PopStack,
 }
 
 /// An update that should be applied to the Executor after executing an instruction
@@ -150,12 +213,17 @@ pub struct Executor {
 pub struct Update {
     pub nextpc: i32,
     pub diff: Option<Diff>,
+    stackop: Option<StackOp>,
 }
 
 impl Update {
     /// Don't change a register, just jump to the given `pc`
     fn jump(nextpc: i32) -> Self {
-        Update { nextpc, diff: None }
+        Update {
+            nextpc,
+            diff: None,
+            stackop: None,
+        }
     }
 }
 
@@ -186,6 +254,9 @@ pub enum ExecError {
 
     #[error("reverted back to start state")]
     StartReached,
+
+    #[error("calling convention violated: {0:?}")]
+    CallingConventionViolation(Vec<Register>),
 }
 
 impl Executor {
@@ -198,11 +269,29 @@ impl Executor {
             executed: 0,
             program,
             regfile: Default::default(),
-            // Start with one snapshot so that we have a state to reset to before
-            // we have even executed and instruction. We have to do this because
-            // we take snapshots in self.commit
+            // Start with one snapshot/frame so that we have a state to reset to
+            // before we have even executed an instruction. We have to do this
+            // because we take snapshots in self.commit
             snapshots: map!(0 => Default::default()),
+            stack: vec![StackFrame {
+                snapshot: Default::default(),
+                executed: 0,
+            }],
             memory: Default::default(),
+        }
+    }
+
+    pub fn stack(&self) -> &Vec<StackFrame> {
+        &self.stack
+    }
+
+    pub fn run(&mut self) -> ExecResult<()> {
+        loop {
+            match self.execute() {
+                Ok(_) => continue,
+                Err(ExecError::Finished) => return Ok(()),
+                other => return other.map(|_| ()),
+            }
         }
     }
 
@@ -255,17 +344,27 @@ impl Executor {
         }
     }
 
-    /// Takes an [`Update`] and applies it to the [`Executor`]
+    /// Takes an [`Update`] and applies it to the [`Executor`].
+    ///
+    /// If the commit fails (for example, due to a memory error), the executor's
+    /// state will not be changed.
     fn commit(&mut self, update: &Update) -> ExecResult<()> {
-        // If necessary, take a snapshot _before_ updating
-        if self.executed % SNAPSHOT_INTERVAL == 0 {
-            if let Some(prev) = self.snapshots.insert(self.executed, self.regfile.clone()) {
-                // Sanity check that that we're still computing the same result
-                // this time around
-                assert_eq!(prev, self.regfile);
+        // If we are returning, all caller-saved registers should be the same
+        if let Some(StackOp::PopStack) = update.stackop {
+            let diff = self.regfile.check(&self.stack.last().unwrap().snapshot);
+            if let Some(diff) = diff {
+                Err(ExecError::CallingConventionViolation(diff))?
+            } else {
+                self.stack.pop().unwrap();
             }
         }
 
+        // Since we don't want to modify the executor if applying the diff fails,
+        // save some state now, and we'll use it after.
+        let executed = self.executed;
+        let snapshot = self.regfile.clone();
+
+        // Apply the change
         if let Some(diff) = update.diff {
             match diff {
                 Diff::Memory { addr, val, op } => {
@@ -281,8 +380,24 @@ impl Executor {
             }
         };
 
-        // Only advance these after applying the diff succeeds (we want to stay
-        // stuck if execution fails)
+        // Retroactively take the snapshot if need be
+        if executed % SNAPSHOT_INTERVAL == 0 {
+            if let Some(prev) = self.snapshots.insert(executed, snapshot.clone()) {
+                // Sanity check that that we're still computing the same result
+                // this time around
+                assert_eq!(prev, snapshot);
+            }
+        }
+
+        // Retroactively record the state of the processor before making the
+        // call (what we did when we applied the change)
+        if let Some(StackOp::PushStack) = update.stackop {
+            self.stack.push(StackFrame {
+                snapshot: snapshot.clone(),
+                executed,
+            })
+        }
+
         self.pc = update.nextpc;
         self.executed += 1;
 
@@ -313,18 +428,21 @@ impl Executor {
         let next_with = |reg, val| Update {
             nextpc: pc + 4,
             diff: Some(Diff::Register { reg, val }),
+            stackop: None,
         };
 
         // Advance the pc by 4 and change the appropriate memory location
         let next_mem = |addr, val, op| Update {
             nextpc: pc + 4,
             diff: Some(Diff::Memory { addr, val, op }),
+            stackop: None,
         };
 
         // Just advance the pc
         let next = Update {
             nextpc: pc + 4,
             diff: None,
+            stackop: None,
         };
 
         let update = match asm {
@@ -478,6 +596,7 @@ impl Executor {
                     reg: Register::ra,
                     val: self.pc + 4,
                 }),
+                stackop: Some(StackOp::PushStack),
             },
             Instruction::jal { rd, label } => Update {
                 nextpc: self.program.label(label).unwrap(),
@@ -485,18 +604,32 @@ impl Executor {
                     reg: *rd,
                     val: self.pc + 4,
                 }),
+                stackop: Some(StackOp::PushStack),
             },
-
             Instruction::jalr { rd, offset, r1 } => Update {
                 nextpc: self.add(regs[r1], *offset).with_context(|| "")? & !1,
                 diff: Some(Diff::Register {
                     reg: *rd,
                     val: self.pc + 4,
                 }),
+                stackop: Some(StackOp::PushStack),
             },
-            Instruction::j { label } => Update::jump(self.program.label(label).unwrap().1),
-            Instruction::jr { rs } => Update::jump(regs[rs]),
-            Instruction::ret {} => Update::jump(regs[Register::ra]),
+            Instruction::j { label } => Update {
+                nextpc: self.program.label(label).unwrap(),
+                diff: None,
+                stackop: None,
+            },
+            Instruction::jr { rs } => Update {
+                nextpc: regs[rs],
+                diff: None,
+                stackop: Some(StackOp::PopStack),
+            },
+
+            Instruction::ret {} => Update {
+                nextpc: regs[Register::ra],
+                diff: None,
+                stackop: Some(StackOp::PopStack),
+            },
         };
         Ok(update)
     }
@@ -504,11 +637,18 @@ impl Executor {
     /// Function that reverts one instruction, returning the [`Update`] that
     /// does the necessary changes.
     pub fn revert(&mut self) -> ExecResult<Update> {
+        // A key observation is that if we reached some state, at all points
+        // leading up to that state, we had a valid execution. Therefore, if
+        // we _correctly_ revert to a certain execution point, we can unwrap all
+        // the execution results leading up to the original point because we know
+        // they didn't causes errors.
+
         if self.executed == 0 {
             return Err(ExecError::StartReached);
         }
 
         let executed = self.executed;
+        let target = executed - 1;
         let offset_from_snapshot = executed.rem_euclid(SNAPSHOT_INTERVAL);
         let base = executed - offset_from_snapshot;
 
@@ -522,9 +662,13 @@ impl Executor {
         self.pc = self.regfile.pc;
         self.executed = base;
 
+        // Reset to the correct stack frame too
+        let frames = self.stack.partition_point(|frame| frame.executed <= target);
+        self.stack.truncate(frames);
+
         // Execute to the state we want to revert to. We know executed cannot be
         // 0 because we check first thing
-        while self.executed < executed - 1 {
+        while self.executed < target {
             self.execute().unwrap();
         }
 
@@ -539,9 +683,23 @@ impl Executor {
             },
         });
 
+        let stackop = forward.stackop.map(|op| match op {
+            StackOp::PushStack => StackOp::PopStack,
+            StackOp::PopStack => StackOp::PushStack,
+        });
+
         Ok(Update {
             nextpc: self.pc,
             diff,
+            stackop,
         })
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_name() {}
 }
