@@ -334,7 +334,7 @@ impl Executor {
                 let val = match op {
                     RegImmOp::Addi => self
                         .add(r1val, imm)
-                        .with_context(|| format!("failed to add: {r1} = {r1val}, imm = {imm}"))?,
+                        .with_context(|| format!("failed to add: {r1} = {r1val:#010x}, imm = {imm:#010x}"))?,
                     RegImmOp::Sltiu => ((r1val as u32) < (imm as u32)) as i32,
                     RegImmOp::Slli => self.shift_left(r1val, imm as u32).with_context(|| {
                         format!("failed to left shift: {r1} = {r1val}, imm = {imm}",)
@@ -343,7 +343,7 @@ impl Executor {
                         self.shift_right_logical(r1val, imm as u32)
                             .with_context(|| {
                                 format!(
-                                    "failed to logical right shift: {r1} = {r1val}, imm = {imm}",
+                                    "failed to logical right shift: {r1} = {r1val:#010x}, imm = {imm:#010x}",
                                 )
                             })?
                     }
@@ -351,7 +351,7 @@ impl Executor {
                         self.shift_right_arithmetic(r1val, imm as u32)
                             .with_context(|| {
                                 format!(
-                                    "failed to arithmetic right shift: {r1} = {r1val}, imm = {imm}",
+                                    "failed to arithmetic right shift: {r1} = {r1val:#010x}, imm = {imm:#010x}",
                                 )
                             })?
                     }
@@ -367,19 +367,19 @@ impl Executor {
                 let r2val = regs[r2];
                 let val = match op {
                     RegRegOp::Add => self.add(r1val, r2val).with_context(|| {
-                        format!("failed to add: {r1} = {r1val}, {r2} = {r2val}")
+                        format!("failed to add: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}")
                     })?,
                     RegRegOp::Sub => self.add(r1val, -r2val).with_context(|| {
-                        format!("failed to subtract: {r1} = {r1val}, {r2} = {r2val}")
+                        format!("failed to subtract: {r1} = {r1val}, {r2:#010x} = {r2val:#010x}")
                     })?,
                     RegRegOp::Sll => self.shift_left(r1val, r2val as u32).with_context(|| {
-                        format!("failed to left shift: {r1} = {r1val}, {r2} = {r2val}")
+                        format!("failed to left shift: {r1} = {r1val}, {r2:#010x} = {r2val:#010x}")
                     })?,
                     RegRegOp::Srl => {
                         self.shift_right_logical(r1val, r2val as u32)
                             .with_context(|| {
                                 format!(
-                                    "failed to logical right shift: {r1} = {r1val}, {r2} = {r2val}",
+                                    "failed to logical right shift: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}",
                                 )
                             })?
                     }
@@ -388,7 +388,7 @@ impl Executor {
                         .shift_right_arithmetic(r1val, r2val as u32)
                         .with_context(|| {
                             format!(
-                                "failed to arithmetic right shift: {r1} = {r1val}, {r2} = {r2val}",
+                                "failed to arithmetic right shift: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}",
                             )
                         })?,
                     RegRegOp::Sltu => ((r1val as u32) + (r2val as u32)) as i32,
@@ -402,7 +402,7 @@ impl Executor {
             Instruction::Load { rd, offset, r1, op } => {
                 let addr = self.add(*offset, regs[r1]).with_context(|| {
                     format!(
-                        "failed to calculate address: {r1} = {}, offset = {offset}",
+                        "failed to calculate address: {r1} = {:#010x}, offset = {offset:#010x}",
                         regs[r1]
                     )
                 })?;
@@ -416,7 +416,7 @@ impl Executor {
             Instruction::Store { r2, offset, r1, op } => {
                 let addr = self.add(*offset, regs[r1]).with_context(|| {
                     format!(
-                        "failed to calculate address: {r1} = {}, offset = {offset}",
+                        "failed to calculate address: {r1} = {:#010x}, offset = {offset:#010x}",
                         regs[r1]
                     )
                 })?;

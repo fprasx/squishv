@@ -44,7 +44,7 @@ impl Memory {
                 }
                 let data = self
                     .load_bytes::<4>(addr)
-                    .with_context(|| format!("failed to load word at {addr:}"))?;
+                    .with_context(|| format!("failed to load word at {addr:#010x}"))?;
                 Ok(i32::from_le_bytes(data))
             }
             LoadOp::Lh => {
@@ -53,7 +53,7 @@ impl Memory {
                 }
                 let data = self
                     .load_bytes::<2>(addr)
-                    .with_context(|| format!("failed to load half word at {addr:}"))?;
+                    .with_context(|| format!("failed to load half word at {addr:#010x}"))?;
                 // Sign extends
                 Ok(i16::from_le_bytes(data) as i32)
             }
@@ -63,21 +63,21 @@ impl Memory {
                 }
                 let data = self
                     .load_bytes::<2>(addr)
-                    .with_context(|| format!("failed to load half word at {addr:}"))?;
+                    .with_context(|| format!("failed to load half word at {addr:#010x}"))?;
                 // First cast to u32 to zero extend, then cast to i32
                 Ok((u16::from_le_bytes(data) as u32) as i32)
             }
             LoadOp::Lb => {
                 let data = self
                     .load_bytes::<1>(addr)
-                    .with_context(|| format!("failed to load byte at {addr:}"))?;
+                    .with_context(|| format!("failed to load byte at {addr:#010x}"))?;
                 // Sign extends
                 Ok(i8::from_le_bytes(data) as i32)
             }
             LoadOp::Lbu => {
                 let data = self
                     .load_bytes::<1>(addr)
-                    .with_context(|| format!("failed to load byte at {addr:}"))?;
+                    .with_context(|| format!("failed to load byte at {addr:#010x}"))?;
                 // First cast to u32 to zero extend, then cast to i32
                 Ok((u8::from_le_bytes(data) as u32) as i32)
             }
