@@ -20,15 +20,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b13c32d80ecc7ab747b80c3784bce54ee8a7a0cc4fbda9bf4cda2cf6fe90854"
 
 [[package]]
-name = "archery"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab7d8a6d00b222909638a01ddcc8c533219e9d5bfada1613afae43481f2fc699"
-dependencies = [
- "static_assertions",
-]
-
-[[package]]
 name = "async-channel"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -672,18 +663,8 @@ dependencies = [
  "anyhow",
  "indoc",
  "parse_int",
- "rpds",
  "serde",
  "thiserror",
-]
-
-[[package]]
-name = "rpds"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e475a12283dfa5e31bd0b0a1a10b5486c0965a34eaf8a695d6df4b47810250d"
-dependencies = [
- "archery",
 ]
 
 [[package]]
@@ -826,12 +807,6 @@ checksum = "2d4f0e86297cad2658d92a707320d87bf4e6ae1050287f51d19b67ef3f153a7b"
 dependencies = [
  "lock_api",
 ]
-
-[[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "syn"
