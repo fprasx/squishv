@@ -187,6 +187,10 @@ pub struct StackFrame {
     /// number of instructions executed _before_ the executing the instruction
     /// that performs the call.
     executed: usize,
+
+    /// The [`Register`] in which the return address of the function we are calling
+    /// is stored.
+    ra_register: Register,
 }
 
 // TODO: use Rc/Arc to make cloning cheaper?
@@ -225,11 +229,25 @@ impl FromStr for Executor {
 
 #[derive(Debug, Clone)]
 enum StackOp {
-    /// Push a new stack frame.
-    PushStack,
+    /// Push a new stack frame. `Register` is the [`Register`] in which the return
+    /// address is stored.
+    PushStack(Register),
 
-    /// Pop a stack frame.
-    PopStack,
+    /// Pop a stack frame. `Register` is the [`Register`] in which the return
+    /// address is stored.
+    PopStack(Register),
+}
+
+impl StackOp {
+    /// Generate the reverse stack operation.
+    ///
+    /// A push becomes a pop and a pop becomes a push. The same register is used.
+    pub fn reverse(&self) -> StackOp {
+        match self {
+            StackOp::PushStack(reg) => StackOp::PopStack(*reg),
+            StackOp::PopStack(reg) => StackOp::PushStack(*reg),
+        }
+    }
 }
 
 /// An update that should be applied to the Executor after executing an instruction
@@ -284,7 +302,25 @@ pub enum ExecError {
     StartReached,
 
     #[error("calling convention violated: {0:?}")]
-    CallingConventionViolation(Vec<Register>),
+    CallingConventionViolation(Vec<CallingConventionError>),
+}
+
+#[derive(Debug, Error)]
+pub enum CallingConventionError {
+    /// When a callee saved register is modified and not restored during a call
+    #[error("{reg} was {pre} before pre-call, {post} after returning")]
+    ModifiedRegister { reg: Register, pre: i32, post: i32 },
+
+    /// When the return address is saved in one register, but we return to a
+    /// return address stored in a different register.
+    #[error("last return address was stored in {save} but returning to address in {other}")]
+    ReturnViaOtherReg {
+        /// The register our last return address was saved in
+        save: Register,
+
+        /// The register being used to get the return address
+        other: Register,
+    },
 }
 
 impl Executor {
@@ -305,6 +341,7 @@ impl Executor {
             stack: vec![StackFrame {
                 snapshot: Default::default(),
                 executed: 0,
+                ra_register: Register::ra,
             }],
             memory: Default::default(),
         }
@@ -379,17 +416,39 @@ impl Executor {
     /// state will not be changed.
     fn commit(&mut self, update: &ExecUpdate) -> ExecResult<()> {
         // If we are returning, all caller-saved registers should be the same
-        if let Some(StackOp::PopStack) = update.stackop {
-            let diff = self.regfile.check(&self.stack.last().unwrap().snapshot);
-            if let Some(diff) = diff {
-                Err(ExecError::CallingConventionViolation(diff))?
-            } else {
-                self.stack.pop().unwrap();
+        if let Some(StackOp::PopStack(reg)) = update.stackop {
+            let mut violations = vec![];
+            let frame = &self.stack.last().unwrap();
+
+            // Make sure we're returning via the same register
+            if frame.ra_register != reg {
+                violations.push(CallingConventionError::ReturnViaOtherReg {
+                    save: frame.ra_register,
+                    other: reg,
+                });
             }
+
+            let diff = self.regfile.check(&frame.snapshot);
+            if let Some(diff) = diff {
+                violations.extend(
+                    diff.iter()
+                        .map(|reg| CallingConventionError::ModifiedRegister {
+                            reg: *reg,
+                            pre: frame.snapshot[reg],
+                            post: self.regfile[reg],
+                        }),
+                )
+            }
+
+            if !violations.is_empty() {
+                Err(ExecError::CallingConventionViolation(violations))?
+            }
+
+            self.stack.pop().unwrap();
         }
 
         // Since we don't want to modify the executor if applying the diff fails,
-        // save some state now, and we'll use it after.
+        // save some state now, and we'll use it after if everything goes well.
         let executed = self.executed;
         let snapshot = self.regfile.clone();
 
@@ -415,12 +474,17 @@ impl Executor {
             }
         }
 
-        // Retroactively record the state of the processor before making the
-        // call (what we did when we applied the change)
-        if let Some(StackOp::PushStack) = update.stackop {
+        // Retroactively record the state of the processor from *before* making
+        // the call (aka applying the change)
+        if let Some(StackOp::PushStack(ra_register)) = update.stackop {
+            let mut snapshot = snapshot.clone();
+            // We actually do want to save the modified register storing the return
+            // address since this is the last thing to happen before the call.
+            snapshot[ra_register] = self.regfile[ra_register];
             self.stack.push(StackFrame {
-                snapshot: snapshot.clone(),
+                snapshot,
                 executed,
+                ra_register,
             })
         }
 
@@ -620,7 +684,7 @@ impl Executor {
                 next_with(*rd, val)
             }
             Instruction::call { label } => {
-                update.stackop = Some(StackOp::PushStack);
+                update.stackop = Some(StackOp::PushStack(Register::ra));
                 ProcessorUpdate {
                     nextpc: self.program.label(label).unwrap(),
                     diff: Some(Diff::Register {
@@ -630,7 +694,7 @@ impl Executor {
                 }
             }
             Instruction::jal { rd, label } => {
-                update.stackop = Some(StackOp::PushStack);
+                update.stackop = Some(StackOp::PushStack(*rd));
                 ProcessorUpdate {
                     nextpc: self.program.label(label).unwrap(),
                     diff: Some(Diff::Register {
@@ -640,7 +704,7 @@ impl Executor {
                 }
             }
             Instruction::jalr { rd, offset, r1 } => {
-                update.stackop = Some(StackOp::PushStack);
+                update.stackop = Some(StackOp::PushStack(*rd));
                 let nextpc = self.add(regs[r1], *offset).with_context(|| {
                     format!(
                         "failed to calculate address: {r1} = {}, offset = {offset}",
@@ -660,14 +724,14 @@ impl Executor {
                 diff: None,
             },
             Instruction::jr { rs } => {
-                update.stackop = Some(StackOp::PopStack);
+                update.stackop = Some(StackOp::PopStack(*rs));
                 ProcessorUpdate {
                     nextpc: regs[rs],
                     diff: None,
                 }
             }
             Instruction::ret {} => {
-                update.stackop = Some(StackOp::PopStack);
+                update.stackop = Some(StackOp::PopStack(Register::ra));
                 ProcessorUpdate {
                     nextpc: regs[Register::ra],
                     diff: None,
@@ -740,10 +804,7 @@ impl Executor {
             },
         });
 
-        let stackop = forward.stackop.map(|op| match op {
-            StackOp::PushStack => StackOp::PopStack,
-            StackOp::PopStack => StackOp::PushStack,
-        });
+        let stackop = forward.stackop.map(|op| StackOp::reverse(&op));
 
         Ok(ExecUpdate {
             processor_update: ProcessorUpdate {
