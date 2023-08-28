@@ -178,11 +178,13 @@ pub struct Config {
     write_to_x0: ConfigLevel,
 }
 
+/// Specialized snapshot of the executor for saving some data before entering a
+/// function call.
 #[derive(Debug, Clone)]
-pub struct StackFrame {
+pub struct FnCallEnter {
     snapshot: RegisterSnapshot,
 
-    /// [`StackFrame`]'s need to store the `executed` at which they were taken so
+    /// [`FnCallEnter`]'s need to store the `executed` at which they were taken so
     /// we can reset to a previous state properly. `executed` represents the
     /// number of instructions executed _before_ the executing the instruction
     /// that performs the call.
@@ -213,10 +215,10 @@ pub struct Executor {
     snapshots: HashMap<usize, RegisterSnapshot>,
     memory: memory::Memory,
 
-    /// This is not quite a stack. Rather, each [`StackFrame`] stores the state
+    /// This is not quite a stack. Rather, each [`FnCallEnter`] stores the state
     /// of the processor right _before_ the call was made. This way, when the
     /// call finishes, we can compare the before and after states.
-    stack: Vec<StackFrame>,
+    stack: Vec<FnCallEnter>,
 }
 
 impl FromStr for Executor {
@@ -338,7 +340,7 @@ impl Executor {
             // before we have even executed an instruction. We have to do this
             // because we take snapshots in self.commit
             snapshots: map!(0 => Default::default()),
-            stack: vec![StackFrame {
+            stack: vec![FnCallEnter {
                 snapshot: Default::default(),
                 executed: 0,
                 ra_register: Register::ra,
@@ -347,7 +349,7 @@ impl Executor {
         }
     }
 
-    pub fn stack(&self) -> &Vec<StackFrame> {
+    pub fn stack(&self) -> &Vec<FnCallEnter> {
         &self.stack
     }
 
@@ -481,7 +483,7 @@ impl Executor {
             // We actually do want to save the modified register storing the return
             // address since this is the last thing to happen before the call.
             snapshot[ra_register] = self.regfile[ra_register];
-            self.stack.push(StackFrame {
+            self.stack.push(FnCallEnter {
                 snapshot,
                 executed,
                 ra_register,
