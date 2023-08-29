@@ -5,9 +5,9 @@ use crate::parse::{LoadOp, StoreOp};
 #[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
 pub struct Config {
     /// The default value for unitialized memory locations. `None` means there is
-    /// not default value and it is an error to access an unitialized location.
+    /// no default value and it is an error to access an unitialized location.
     /// Defaults to `None`.
-    default_value: Option<u8>,
+    pub default_value: Option<u8>,
 
     /// Whether or not to allow unaligned accesses. Defaults to `false`.
     allow_unaligned: bool,
@@ -27,10 +27,10 @@ impl Config {
 /// See [`Config`] for more details.
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct Memory {
-    config: Config,
+    pub config: Config,
 
     // Bytes are stored in little-endian order
-    mem: HashMap<i32, u8>,
+    pub mem: HashMap<i32, u8>,
 }
 
 type MemoryResult<T> = Result<T, MemoryError>;
