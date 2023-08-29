@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
-use thiserror::Error;
 
 use crate::{
     map,
@@ -17,6 +16,8 @@ use crate::{
         StoreOp, UnaryOp,
     },
 };
+
+use self::memory::MemoryError;
 
 /// Take a snapshot of the registers every `SNAPSHOT_INTERVAL` instructions.
 pub const SNAPSHOT_INTERVAL: usize = 1000;
@@ -261,10 +262,11 @@ pub struct ProcessorUpdate {
 
 #[derive(Debug)]
 pub struct ExecUpdate {
+    pc: i32,
     processor_update: ProcessorUpdate,
     stackop: Option<StackOp>,
 
-    /// These generallyg get
+    /// These generally get
     warnings: Vec<ExecError>,
 }
 
@@ -284,38 +286,87 @@ pub enum Diff {
 
 pub type ExecResult<T> = Result<T, ExecError>;
 
-#[derive(Error, Debug)]
-pub enum ExecError {
-    #[error("attempt to write {val} to x0 (hardwired zero)")]
-    WriteToX0 { val: i32 },
+/// An execution error.
+///
+/// Generally we produce [`ExecErrorInner`] during execution and turn it into an
+/// [`ExecError`] only in the last step of executiong (commiting).
+#[derive(Debug)]
+pub struct ExecError {
+    /// The pc where the error happened
+    pc: i32,
+
+    error: ExecErrorInner,
+}
+
+#[derive(Debug)]
+pub enum ExecErrorInner {
+    // #[error("attempt to write {val} to x0 (hardwired zero)")]
+    WriteToX0 {
+        val: i32,
+    },
 
     /// An error due to the memory system
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    // #[error(transparent)]
+    // Other(anyhow::Error),
+    Memory(MemoryError),
 
     /// Returned when we've hit a breakpoint. It is safe to continue after this.
-    #[error("breakpoint hit")]
+    // #[error("breakpoint hit")]
     BreakPoint,
 
-    #[error("execution finished")]
+    // #[error("execution finished")]
     Finished,
 
-    #[error("reverted back to start state")]
+    // #[error("reverted back to start state")]
     StartReached,
 
-    #[error("calling convention violated: {0:?}")]
+    Overflow(OverflowError),
+
+    // #[error("calling convention violated: {0:?}")]
     CallingConventionViolation(Vec<CallingConventionError>),
 }
 
-#[derive(Debug, Error)]
+impl From<MemoryError> for ExecErrorInner {
+    fn from(value: MemoryError) -> Self {
+        Self::Memory(value)
+    }
+}
+
+impl From<OverflowError> for ExecErrorInner {
+    fn from(value: OverflowError) -> Self {
+        Self::Overflow(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum OverflowError {
+    Add { base: i32, adding: i32 },
+    Sub { base: i32, adding: i32 },
+    ShiftLeft { base: i32, shamt: u32 },
+    ShiftRight { base: i32, shamt: u32 },
+}
+
+impl From<CallingConventionError> for ExecErrorInner {
+    fn from(value: CallingConventionError) -> Self {
+        Self::CallingConventionViolation(vec![value])
+    }
+}
+
+impl From<Vec<CallingConventionError>> for ExecErrorInner {
+    fn from(value: Vec<CallingConventionError>) -> Self {
+        Self::CallingConventionViolation(value)
+    }
+}
+
+#[derive(Debug)]
 pub enum CallingConventionError {
     /// When a callee saved register is modified and not restored during a call
-    #[error("{reg} was {pre} before pre-call, {post} after returning")]
+    // #[error("{reg} was {pre} before pre-call, {post} after returning")]
     ModifiedRegister { reg: Register, pre: i32, post: i32 },
 
     /// When the return address is saved in one register, but we return to a
     /// return address stored in a different register.
-    #[error("last return address was stored in {save} but returning to address in {other}")]
+    // #[error("last return address was stored in {save} but returning to address in {other}")]
     ReturnViaOtherReg {
         /// The register our last return address was saved in
         save: Register,
@@ -357,15 +408,21 @@ impl Executor {
         loop {
             match self.execute() {
                 Ok(_) => continue,
-                Err(ExecError::Finished) => return Ok(()),
+                Err(ExecError {
+                    pc,
+                    error: ExecErrorInner::Finished,
+                }) => return Ok(()),
                 other => return other.map(|_| ()),
             }
         }
     }
 
-    pub fn set(&mut self, reg: Register, val: i32) -> ExecResult<()> {
+    pub fn set(&mut self, reg: Register, val: i32, pc: i32) -> ExecResult<()> {
         if reg == Register::x0 {
-            Err(ExecError::WriteToX0 { val })
+            Err(ExecError {
+                pc,
+                error: ExecErrorInner::WriteToX0 { val },
+            })
         } else {
             self.regfile[reg] = val;
             Ok(())
@@ -373,41 +430,59 @@ impl Executor {
     }
 
     /// Adds two numbers while respecting the configuration for overflow behaviour.
-    fn add(&self, fst: i32, snd: i32) -> anyhow::Result<i32> {
+    fn add(&self, fst: i32, snd: i32) -> Result<i32, ExecErrorInner> {
         match self.config.overflow_mode {
             OverflowBehaviour::Wrap => Ok(fst.wrapping_add(snd)),
             OverflowBehaviour::Saturate => Ok(fst.saturating_add(snd)),
-            OverflowBehaviour::Trap => fst
-                .checked_add(snd)
-                .ok_or_else(|| anyhow!("overflow error")),
+            OverflowBehaviour::Trap => fst.checked_add(snd).ok_or_else(|| {
+                ExecErrorInner::Overflow(OverflowError::Add {
+                    base: fst,
+                    adding: snd,
+                })
+            }),
         }
     }
 
     /// Left shifts while respecting the configuration for overflow behaviour.
-    fn shift_left(&self, fst: i32, shamt: u32) -> anyhow::Result<i32> {
+    fn shift_left(&self, fst: i32, shamt: u32) -> Result<i32, ExecErrorInner> {
         let (res, overflowed) = fst.overflowing_shl(shamt);
         match self.config.overflow_mode {
-            OverflowBehaviour::Trap if overflowed => Err(anyhow!("overflow error")),
+            OverflowBehaviour::Trap if overflowed => {
+                Err(ExecErrorInner::Overflow(OverflowError::ShiftLeft {
+                    base: fst,
+                    shamt,
+                }))
+            }
             _ => Ok(res),
         }
     }
 
     /// Logical right shifts while respecting the configuration for overflow behaviour.
-    fn shift_right_logical(&self, fst: i32, shamt: u32) -> anyhow::Result<i32> {
+    fn shift_right_logical(&self, fst: i32, shamt: u32) -> Result<i32, ExecErrorInner> {
         // right shifts are arithmetic on signed integers and logical on unsigned integers
         let (res, overflowed) = (fst as u32).overflowing_shr(shamt);
         match self.config.overflow_mode {
-            OverflowBehaviour::Trap if overflowed => Err(anyhow!("overflow error")),
+            OverflowBehaviour::Trap if overflowed => {
+                Err(ExecErrorInner::Overflow(OverflowError::ShiftRight {
+                    base: fst,
+                    shamt,
+                }))
+            }
             _ => Ok(res as i32),
         }
     }
 
     /// Arithmetic right shifts while respecting the configuration for overflow behaviour.
-    fn shift_right_arithmetic(&self, fst: i32, shamt: u32) -> anyhow::Result<i32> {
+    fn shift_right_arithmetic(&self, fst: i32, shamt: u32) -> Result<i32, ExecErrorInner> {
         // right shifts are arithmetic on signed integers and logical on unsigned integers
         let (res, overflowed) = fst.overflowing_shr(shamt);
         match self.config.overflow_mode {
-            OverflowBehaviour::Trap if overflowed => Err(anyhow!("overflow error")),
+            OverflowBehaviour::Trap if overflowed => {
+                Err(ExecErrorInner::Overflow(OverflowError::ShiftRight {
+                    base: fst,
+                    shamt,
+                }))
+            }
             _ => Ok(res),
         }
     }
@@ -443,7 +518,10 @@ impl Executor {
             }
 
             if !violations.is_empty() {
-                Err(ExecError::CallingConventionViolation(violations))?
+                Err(ExecError {
+                    pc: self.pc,
+                    error: ExecErrorInner::CallingConventionViolation(violations),
+                })?
             }
 
             self.stack.pop().unwrap();
@@ -458,7 +536,12 @@ impl Executor {
         if let Some(diff) = update.processor_update.diff {
             match diff {
                 Diff::Memory { addr, val, op } => {
-                    self.memory.store(addr, val, op)?;
+                    if let Err(error) = self.memory.store(addr, val, op) {
+                        Err(ExecError {
+                            pc: self.pc,
+                            error: error.into(),
+                        })?
+                    }
                 }
                 Diff::Register { reg, val } => {
                     // Checking for writes to x0 is handled in calculate_update
@@ -498,22 +581,23 @@ impl Executor {
 
     pub fn execute(&mut self) -> ExecResult<ExecUpdate> {
         let Some(asm) = self.program.at(self.pc) else {
-            return Err(ExecError::Finished);
+            return Err(ExecError { pc: self.pc, error: ExecErrorInner::Finished });
         };
         let update = self
             .calculate_update(asm)
-            .context("failed to execute next instruction")?;
+            .map_err(|error| ExecError { pc: self.pc, error })?;
         self.commit(&update)?;
         Ok(update)
     }
 
     /// Stateless function that returns an [`ExecUpdate`] to produce the next
     /// [`Executor`] state.
-    fn calculate_update(&self, asm: &Instruction) -> ExecResult<ExecUpdate> {
+    fn calculate_update(&self, asm: &Instruction) -> Result<ExecUpdate, ExecErrorInner> {
         let regs = &self.regfile;
         let pc = self.pc;
 
         let mut update = ExecUpdate {
+            pc,
             processor_update: ProcessorUpdate {
                 nextpc: -1,
                 diff: None,
@@ -546,29 +630,11 @@ impl Executor {
                 let imm = *imm;
                 let r1val = regs[r1];
                 let val = match op {
-                    RegImmOp::Addi => self
-                        .add(r1val, imm)
-                        .with_context(|| format!("failed to add: {r1} = {r1val:#010x}, imm = {imm:#010x}"))?,
+                    RegImmOp::Addi => self.add(r1val, imm)?,
                     RegImmOp::Sltiu => ((r1val as u32) < (imm as u32)) as i32,
-                    RegImmOp::Slli => self.shift_left(r1val, imm as u32).with_context(|| {
-                        format!("failed to left shift: {r1} = {r1val}, imm = {imm}",)
-                    })?,
-                    RegImmOp::Srli => {
-                        self.shift_right_logical(r1val, imm as u32)
-                            .with_context(|| {
-                                format!(
-                                    "failed to logical right shift: {r1} = {r1val:#010x}, imm = {imm:#010x}",
-                                )
-                            })?
-                    }
-                    RegImmOp::Srai => {
-                        self.shift_right_arithmetic(r1val, imm as u32)
-                            .with_context(|| {
-                                format!(
-                                    "failed to arithmetic right shift: {r1} = {r1val:#010x}, imm = {imm:#010x}",
-                                )
-                            })?
-                    }
+                    RegImmOp::Slli => self.shift_left(r1val, imm as u32)?,
+                    RegImmOp::Srli => self.shift_right_logical(r1val, imm as u32)?,
+                    RegImmOp::Srai => self.shift_right_arithmetic(r1val, imm as u32)?,
                     RegImmOp::Slti => (regs[r1] < imm) as i32,
                     RegImmOp::Xori => regs[r1] ^ imm,
                     RegImmOp::Ori => regs[r1] | imm,
@@ -580,31 +646,11 @@ impl Executor {
                 let r1val = regs[r1];
                 let r2val = regs[r2];
                 let val = match op {
-                    RegRegOp::Add => self.add(r1val, r2val).with_context(|| {
-                        format!("failed to add: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}")
-                    })?,
-                    RegRegOp::Sub => self.add(r1val, -r2val).with_context(|| {
-                        format!("failed to subtract: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}")
-                    })?,
-                    RegRegOp::Sll => self.shift_left(r1val, r2val as u32).with_context(|| {
-                        format!("failed to left shift: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}")
-                    })?,
-                    RegRegOp::Srl => {
-                        self.shift_right_logical(r1val, r2val as u32)
-                            .with_context(|| {
-                                format!(
-                                    "failed to logical right shift: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}",
-                                )
-                            })?
-                    }
-
-                    RegRegOp::Sra => self
-                        .shift_right_arithmetic(r1val, r2val as u32)
-                        .with_context(|| {
-                            format!(
-                                "failed to arithmetic right shift: {r1} = {r1val:#010x}, {r2} = {r2val:#010x}",
-                            )
-                        })?,
+                    RegRegOp::Add => self.add(r1val, r2val)?,
+                    RegRegOp::Sub => self.add(r1val, -r2val)?,
+                    RegRegOp::Sll => self.shift_left(r1val, r2val as u32)?,
+                    RegRegOp::Srl => self.shift_right_logical(r1val, r2val as u32)?,
+                    RegRegOp::Sra => self.shift_right_arithmetic(r1val, r2val as u32)?,
                     RegRegOp::Sltu => ((r1val as u32) + (r2val as u32)) as i32,
                     RegRegOp::Slt => (r1val < r2val) as i32,
                     RegRegOp::Xor => r1val ^ r2val,
@@ -614,25 +660,12 @@ impl Executor {
                 next_with(*rd, val)
             }
             Instruction::Load { rd, offset, r1, op } => {
-                let addr = self.add(*offset, regs[r1]).with_context(|| {
-                    format!(
-                        "failed to calculate address: {r1} = {:#010x}, offset = {offset:#010x}",
-                        regs[r1]
-                    )
-                })?;
-                let val = self
-                    .memory
-                    .load(addr, *op)
-                    .context("failed to perform load")?;
+                let addr = self.add(*offset, regs[r1])?;
+                let val = self.memory.load(addr, *op)?;
                 next_with(*rd, val)
             }
             Instruction::Store { r2, offset, r1, op } => {
-                let addr = self.add(*offset, regs[r1]).with_context(|| {
-                    format!(
-                        "failed to calculate address: {r1} = {:#010x}, offset = {offset:#010x}",
-                        regs[r1]
-                    )
-                })?;
+                let addr = self.add(*offset, regs[r1])?;
                 next_mem(addr, regs[r2], *op)
             }
             Instruction::Branch { r1, r2, label, op } => {
@@ -707,12 +740,7 @@ impl Executor {
             }
             Instruction::jalr { rd, offset, r1 } => {
                 update.stackop = Some(StackOp::PushStack(*rd));
-                let nextpc = self.add(regs[r1], *offset).with_context(|| {
-                    format!(
-                        "failed to calculate address: {r1} = {}, offset = {offset}",
-                        regs[r1]
-                    )
-                })?;
+                let nextpc = self.add(regs[r1], *offset)?;
                 ProcessorUpdate {
                     nextpc,
                     diff: Some(Diff::Register {
@@ -747,8 +775,11 @@ impl Executor {
             if reg == Register::ra {
                 match self.config.write_to_x0 {
                     ConfigLevel::Allow => (),
-                    ConfigLevel::Warn => update.warnings.push(ExecError::WriteToX0 { val }),
-                    ConfigLevel::Deny => Err(ExecError::WriteToX0 { val })?,
+                    ConfigLevel::Warn => update.warnings.push(ExecError {
+                        pc: self.pc,
+                        error: ExecErrorInner::WriteToX0 { val },
+                    }),
+                    ConfigLevel::Deny => Err(ExecErrorInner::WriteToX0 { val })?,
                 }
             }
         }
@@ -757,9 +788,8 @@ impl Executor {
         Ok(update)
     }
 
-    /// Function that reverts one instruction, returning the [`Update`] that
-    /// does the necessary changes.
-    pub fn revert(&mut self) -> ExecResult<ExecUpdate> {
+    /// Revert one instruction, returning false if we are already at the start.
+    pub fn revert(&mut self) -> bool {
         // A key observation is that if we reached some state, at all points
         // leading up to that state, we had a valid execution. Therefore, if
         // we _correctly_ revert to a certain execution point, we can unwrap all
@@ -767,7 +797,7 @@ impl Executor {
         // they didn't causes errors.
 
         if self.executed == 0 {
-            return Err(ExecError::StartReached);
+            return false;
         }
 
         let executed = self.executed;
@@ -798,7 +828,7 @@ impl Executor {
         // Generate the next update so we can reverse it to figure out the diff
         // that reverts from the start state
         let asm = self.program.at(self.pc).unwrap();
-        let forward = self.calculate_update(&asm).unwrap();
+        let forward = self.calculate_update(asm).unwrap();
         let diff = forward.processor_update.diff.map(|diff| match diff {
             Diff::Memory { addr, val, op } => todo!(),
             Diff::Register { reg, .. } => Diff::Register {
@@ -809,16 +839,7 @@ impl Executor {
 
         let stackop = forward.stackop.map(|op| StackOp::reverse(&op));
 
-        Ok(ExecUpdate {
-            processor_update: ProcessorUpdate {
-                nextpc: self.pc,
-                diff,
-            },
-            stackop,
-            // TODO: might be worthwile to check if there are any warnings going
-            // into the state we are reverting to.
-            warnings: vec![],
-        })
+        false
     }
 }
 

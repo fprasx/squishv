@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use anyhow::{bail, ensure, Context};
-
 use crate::parse::{LoadOp, StoreOp};
 
 #[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
@@ -24,10 +22,10 @@ impl Config {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
 /// Byte addressible memory that handles unitialized values and unaligned access.
 ///
 /// See [`Config`] for more details.
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub struct Memory {
     config: Config,
 
@@ -35,49 +33,47 @@ pub struct Memory {
     mem: HashMap<i32, u8>,
 }
 
+type MemoryResult<T> = Result<T, MemoryError>;
+
+#[derive(Debug)]
+pub enum MemoryError {
+    UnalignedAccess(i32),
+    UnitializedAccess(i32),
+}
+
 impl Memory {
-    pub fn load(&self, addr: i32, op: LoadOp) -> anyhow::Result<i32> {
+    pub fn load(&self, addr: i32, op: LoadOp) -> MemoryResult<i32> {
         match op {
             LoadOp::Lw => {
-                if !self.config.allow_unaligned {
-                    ensure!(addr & 0b11 == 0, "uanligned access: address = {addr:#010x}");
+                if !self.config.allow_unaligned && !(addr & 0b11 == 0) {
+                    Err(MemoryError::UnalignedAccess(addr))?
                 }
-                let data = self
-                    .load_bytes::<4>(addr)
-                    .with_context(|| format!("failed to load word at {addr:#010x}"))?;
+                let data = self.load_bytes::<4>(addr)?;
                 Ok(i32::from_le_bytes(data))
             }
             LoadOp::Lh => {
-                if !self.config.allow_unaligned {
-                    ensure!(addr & 0b1 == 0, "unaligned access: address = {addr:#010x}");
+                if !self.config.allow_unaligned && !(addr & 0b1 == 0) {
+                    Err(MemoryError::UnalignedAccess(addr))?
                 }
-                let data = self
-                    .load_bytes::<2>(addr)
-                    .with_context(|| format!("failed to load half word at {addr:#010x}"))?;
+                let data = self.load_bytes::<2>(addr)?;
                 // Sign extends
                 Ok(i16::from_le_bytes(data) as i32)
             }
             LoadOp::Lhu => {
-                if !self.config.allow_unaligned {
-                    ensure!(addr & 0b1 == 0, "uanligned access: address = {addr:#010x}");
+                if !self.config.allow_unaligned && !(addr & 0b1 == 0) {
+                    Err(MemoryError::UnalignedAccess(addr))?
                 }
-                let data = self
-                    .load_bytes::<2>(addr)
-                    .with_context(|| format!("failed to load half word at {addr:#010x}"))?;
+                let data = self.load_bytes::<2>(addr)?;
                 // First cast to u32 to zero extend, then cast to i32
                 Ok((u16::from_le_bytes(data) as u32) as i32)
             }
             LoadOp::Lb => {
-                let data = self
-                    .load_bytes::<1>(addr)
-                    .with_context(|| format!("failed to load byte at {addr:#010x}"))?;
+                let data = self.load_bytes::<1>(addr)?;
                 // Sign extends
                 Ok(i8::from_le_bytes(data) as i32)
             }
             LoadOp::Lbu => {
-                let data = self
-                    .load_bytes::<1>(addr)
-                    .with_context(|| format!("failed to load byte at {addr:#010x}"))?;
+                let data = self.load_bytes::<1>(addr)?;
                 // First cast to u32 to zero extend, then cast to i32
                 Ok((u8::from_le_bytes(data) as u32) as i32)
             }
@@ -86,12 +82,12 @@ impl Memory {
 
     /// Load `N` bytes, starting at the base address. Returns an error if any of
     /// then is unitialized.
-    fn load_bytes<const N: usize>(&self, base_addr: i32) -> anyhow::Result<[u8; N]> {
+    fn load_bytes<const N: usize>(&self, base_addr: i32) -> MemoryResult<[u8; N]> {
         let mut data = [0u8; N];
         for (offset, spot) in data.iter_mut().enumerate() {
             let addr = base_addr + (offset as i32);
             let Some(byte) = self.mem.get(&addr).copied().or(self.config.default_value) else {
-                bail!("access to unitialized address: {addr:#010x}")
+                Err(MemoryError::UnitializedAccess(addr))?
             };
             *spot = byte;
         }
@@ -108,18 +104,18 @@ impl Memory {
 
     /// Store a value at a certain address, returning the value that was previously
     /// there, if any.
-    pub fn store(&mut self, addr: i32, val: i32, op: StoreOp) -> anyhow::Result<()> {
+    pub fn store(&mut self, addr: i32, val: i32, op: StoreOp) -> MemoryResult<()> {
         // Note: casting to a smaller integer type truncates, which is what we want
         match op {
             StoreOp::Sw => {
-                if !self.config.allow_unaligned {
-                    ensure!(addr & 0b11 == 0, "uanligned access: address = {addr:#010x}");
+                if !self.config.allow_unaligned && !(addr & 0b11 == 0) {
+                    Err(MemoryError::UnalignedAccess(addr))?;
                 }
                 self.store_bytes(addr, val.to_le_bytes());
             }
             StoreOp::Sh => {
-                if !self.config.allow_unaligned {
-                    ensure!(addr & 0b1 == 0, "uanligned access: address = {addr:#010x}");
+                if !self.config.allow_unaligned && !(addr & 0b1 == 0) {
+                    Err(MemoryError::UnalignedAccess(addr))?;
                 }
                 self.store_bytes(addr, (val as i16).to_le_bytes());
             }
