@@ -288,7 +288,7 @@ impl fmt::Display for Instruction {
 /// An item of RISC-V assembly, either an instruction or label (for now)
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
 pub enum Item {
-    Instruction(Instruction),
+    Instruction { instr: Instruction, span: Span },
 
     // Include span info so that we can emit better error messages during the
     // post-processing stage of parsing, where we check that all labels accessed
@@ -300,7 +300,7 @@ impl Item {
     /// Access the inner instruction. Panic if not called on an instruction.
     pub fn get_instruction(&self) -> &Instruction {
         match self {
-            Item::Instruction(i) => i,
+            Item::Instruction { instr, .. } => instr,
             Item::Label { .. } => unreachable!("unwrap_instruction called on label"),
         }
     }
@@ -308,7 +308,7 @@ impl Item {
     /// Access the inner label. Panic if not called on an label.
     pub fn get_label(self) -> String {
         match self {
-            Item::Instruction(_) => unreachable!("unwrap_label called on instruction"),
+            Item::Instruction { .. } => unreachable!("unwrap_label called on instruction"),
             Item::Label { name, .. } => name,
         }
     }
@@ -488,7 +488,10 @@ impl<'a> Lexer<'a> {
                 other => bail!("unknown instruction: {other}"),
             }
         };
-        Ok(Item::Instruction(instruction))
+        Ok(Item::Instruction {
+            instr: instruction,
+            span,
+        })
     }
 }
 
@@ -566,7 +569,7 @@ impl Program {
         // Make sure each label is actually defined somewhere
         let mut pc = 0;
         for instr in items.iter() {
-            let Item::Instruction(instr) = instr else {
+            let Item::Instruction { instr, .. } = instr else {
                 pc += 4;
                 continue;
             };
@@ -596,8 +599,8 @@ impl Program {
             asm: items
                 .into_iter()
                 .filter_map(|item| {
-                    if let Item::Instruction(asm) = item {
-                        Some(asm)
+                    if let Item::Instruction { instr, .. } = item {
+                        Some(instr)
                     } else {
                         None
                     }
