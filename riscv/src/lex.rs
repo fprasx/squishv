@@ -1,4 +1,4 @@
-use anyhow::bail;
+use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use std::{fmt, mem, ops::Range};
 
@@ -128,7 +128,7 @@ macro_rules! parse_token {
                             // the call with .constant() will just return "ran out of
                             // input" instead of the actual error, instead of the actual
                             // error, which is reported on the .minus() call.
-                            bail!("Expected {}, but {e}", stringify!($tokenfn))
+                            ::anyhow::bail!("Expected {}, but {e}", stringify!($tokenfn))
                         }
                         None => ::anyhow::bail!(
                             "Expected {}, but ran out of input", stringify!($tokenfn)
@@ -267,7 +267,8 @@ impl<'a> RawLexer<'a> {
         let start = self.char;
 
         // little utility for format errors with span info
-        let fail = |error: &str, line, columns| bail!("{error}, line {line}, columns {columns:?}");
+        let fail_message =
+            |error: &str, line, columns| format!("{error}, line {line}, columns {columns:?}");
 
         Some(if self.buf.starts_with('(') {
             Ok(Token::new(TokenInner::LeftParen, line, self.advance(1)))
@@ -301,24 +302,30 @@ impl<'a> RawLexer<'a> {
             if let Some(digits) = rest.consume(|c| c.is_ascii_hexdigit()) {
                 let token_len = digits.len() + 2;
                 let hex = format!("0x{}", digits);
-                match parse_int::parse::<i32>(&hex) {
+
+                // We cannot parse negative numbers into i32 (even if i32 can hold
+                // negative numbers) because of "value out of bounds" errors. So
+                // we first parse into a u32 then cast to i32.
+                match parse_int::parse::<u32>(&hex) {
                     Ok(number) => Ok(Token::new(
-                        TokenInner::Constant(number),
+                        TokenInner::Constant(number as i32),
                         line,
                         self.advance(token_len),
                     )),
-                    Err(_) => fail(
-                        &format!("failed to parse '{hex}'"),
-                        self.line,
-                        self.char..self.char + token_len,
-                    ),
+                    Err(e) => Err(e).with_context(|| {
+                        fail_message(
+                            &format!("failed to parse '{hex}'"),
+                            line,
+                            start..start + token_len,
+                        )
+                    }),
                 }
             } else {
-                fail(
+                Err(anyhow!(fail_message(
                     "got hex prefix 0x but no digits following",
                     self.line,
                     self.char..self.char + 2,
-                )
+                )))
             }
         } else if let Some(digits) = self.buf.consume(|c| c.is_ascii_digit()) {
             let token_len = digits.len();
@@ -328,11 +335,13 @@ impl<'a> RawLexer<'a> {
                     line,
                     self.advance(token_len),
                 )),
-                Err(_) => fail(
-                    &format!("failed to parse {digits}"),
-                    line,
-                    start..start + token_len,
-                ),
+                Err(e) => Err(e).with_context(|| {
+                    fail_message(
+                        &format!("failed to parse '{digits}'"),
+                        line,
+                        start..start + token_len,
+                    )
+                }),
             }
         } else if let Some(label) = self.buf.consume(|c| c == '_' || c.is_alphanumeric()) {
             // Note: parse labels last as they can contain numbers, but we don't want
@@ -343,11 +352,11 @@ impl<'a> RawLexer<'a> {
                 self.advance(label.len()),
             ))
         } else {
-            fail(
+            Err(anyhow!(fail_message(
                 &format!("cannot parse '{}'", self.buf),
                 line,
                 start..start + 1,
-            )
+            )))
         })
     }
 }
@@ -472,6 +481,15 @@ mod tests {
         let mut lexer = Lexer::new("&%^*");
         assert!(matches!(lexer.next(), Some(Err(_))));
         assert!(lexer.next().is_none())
+    }
+
+    #[test]
+    fn lex_negative() {
+        let mut lexer = Lexer::new("0x80000000");
+        assert_eq!(
+            lexer.next().unwrap().unwrap(),
+            Token::new(TokenInner::Constant(i32::MIN), 1, 1..11)
+        )
     }
 
     /// This test asserts that peeking for a token with something like `.minus()`
