@@ -721,6 +721,7 @@ impl Executor {
                     }),
                 }
             }
+            Instruction::la { rd, label } => next_with(*rd, self.program.label(label).unwrap()),
             Instruction::j { label } => ProcessorUpdate {
                 nextpc: self.program.label(label).unwrap(),
                 diff: None,

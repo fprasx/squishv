@@ -244,8 +244,8 @@ declare_instruction_set!(
 pub enum Instruction {
     RegImm { rd: Register, r1: Register, imm: i32, op: RegImmOp },
     RegReg { rd: Register, r1: Register, r2: Register, op: RegRegOp },
-    Load {rd: Register, offset: i32, r1: Register, op: LoadOp },
-    Store {r2: Register, offset: i32, r1: Register, op: StoreOp },
+    Load { rd: Register, offset: i32, r1: Register, op: LoadOp },
+    Store { r2: Register, offset: i32, r1: Register, op: StoreOp },
     Branch  { r1: Register, r2: Register, label: String, op: BranchOp },
     LoadImm { rd: Register, imm: i32, op: LoadImmOp },
     BranchZero { r1: Register, label: String, op: BranchZeroOp },
@@ -257,6 +257,7 @@ pub enum Instruction {
     jal         { rd: Register, label: String },
     // Note: if a register is not provided, assume 0(rd)
     jalr        { rd: Register, offset: i32, r1: Register },
+    la          { rd: Register, label: String },
     j           { label: String },
     jr          { rs: Register },
     ret         {},
@@ -275,6 +276,7 @@ impl fmt::Display for Instruction {
             Instruction::Unary { rd, r1, op } => write!(f, "{op} {rd}, {r1}"),
             Instruction::call { label } => write!(f, "call {label}"),
             Instruction::jal { rd, label } => write!(f, "jal {rd}, {label}"),
+            Instruction::la { rd, label } => write!(f, "la {rd}, {label}"),
             Instruction::jalr { rd, offset, r1 } => write!(f, "jalr {rd}, {offset}({r1})"),
             Instruction::j { label } => write!(f, "j {label}"),
             Instruction::jr { rs } => write!(f, "jr {rs}"),
@@ -415,12 +417,13 @@ impl<'a> Lexer<'a> {
             }
             Instruction::LoadImm { rd, imm, op }
         } else {
-            // call        { label: &'a str },
-            // jal         { rd: Register, label: &'a str },
+            // call        { label: String },
+            // jal         { rd: Register, label: String },
+            // j           { label: String },
             // jalr        { rd: Register, offset: i32, r1: Register },
-            // j           { label: &'a str },
             // jr          { rs: Register },
             // ret         {},
+            // la          { rd: Register, label: String }
             match ident.as_str() {
                 "call" => {
                     let label = self.ident()?.unwrap_ident().0;
@@ -441,6 +444,12 @@ impl<'a> Lexer<'a> {
                             label: ident.unwrap_ident().0,
                         }
                     }
+                }
+                "la" => {
+                    let rd = self.ident()?.try_into()?;
+                    let _ = self.comma()?;
+                    let label = self.ident()?.unwrap_ident().0;
+                    Instruction::la { rd, label }
                 }
                 // Note: if a register is not provided, assume 0(rd)
                 "jalr" => {
@@ -567,6 +576,7 @@ impl Program {
                 Instruction::call { label } => label,
                 Instruction::jal { label, .. } => label,
                 Instruction::j { label } => label,
+                Instruction::la { rd, label } => label,
                 _ => continue,
             };
             if !labels2spans.contains_key(label) {
@@ -835,6 +845,7 @@ mod tests {
             bne a3, s10, sing
             jr s3
             open:
+            chair:
             li t4, -21
             pelt:
             tiro:
@@ -842,6 +853,7 @@ mod tests {
             bnez a3, raw
             blez s7, hew
             beqz x0, tors
+            la tp, chair
         "};
         let instructions = vec![
             Load {
@@ -1146,6 +1158,10 @@ mod tests {
                 r1: x0,
                 label: "tors".to_string(),
                 op: Beqz,
+            },
+            la {
+                rd: tp,
+                label: "chair".to_string(),
             },
         ];
         assert_eq!(Program::try_from(source).unwrap().asm, instructions)
