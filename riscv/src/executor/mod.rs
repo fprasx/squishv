@@ -781,7 +781,7 @@ impl Executor {
 
         // Make sure writing to x0 follows the config
         if let Some(Diff::Register { reg, val }) = processor_update.diff {
-            if reg == Register::ra {
+            if reg == Register::x0 {
                 match self.config.write_to_x0 {
                     ConfigLevel::Allow => (),
                     ConfigLevel::Warn => update.warnings.push(ExecError {
